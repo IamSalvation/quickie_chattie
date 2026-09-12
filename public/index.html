@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Quickie - Instant Chat</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+    <div class="app-container">
+
+        <!-- ===== LOGIN SCREEN ===== -->
+        <div id="loginScreen" class="login-screen">
+            <button id="darkModeToggle" class="dark-mode-toggle" title="Toggle Dark Mode">
+                <i data-lucide="moon"></i>
+            </button>
+
+            <div class="bg-blob blob-1"></div>
+            <div class="bg-blob blob-2"></div>
+            <div class="bg-blob blob-3"></div>
+
+            <div class="login-content">
+                <div class="logo">Quick<span>ie</span></div>
+                <p class="subtitle">Instant private chat · No sign-up required</p>
+
+                <div class="login-section">
+                    <div class="glass-card pin-section">
+                        <div class="input-group">
+                            <label for="phoneInput">
+                                <i data-lucide="smartphone"></i> Enter your phone number
+                            </label>
+                            <input type="tel" id="phoneInput" placeholder="+234 801 234 5678" />
+                        </div>
+                        <div class="pin-actions">
+                            <button id="generatePinBtn" class="btn btn-primary">
+                                <i data-lucide="rocket"></i> Generate My PIN
+                            </button>
+                            <button id="recoverPinBtn" class="btn btn-secondary">
+                                <i data-lucide="search"></i> Recover PIN
+                            </button>
+                        </div>
+                        <div id="pinDisplayArea" class="pin-display-area hidden">
+                            <span class="pin-label">YOUR PIN</span>
+                            <div id="pinDisplay" class="pin-display">- - - - - - - -</div>
+                            <button id="copyPinBtn" class="btn btn-small">
+                                <i data-lucide="copy"></i> Copy PIN
+                            </button>
+                            <button id="loginAfterGenerateBtn" class="btn btn-success">
+                                <i data-lucide="arrow-right"></i> Go to Chats
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="divider">
+                        <hr /> or
+                        <hr />
+                    </div>
+
+                    <div class="glass-card login-form">
+                        <label for="loginPinInput">
+                            <i data-lucide="key-round"></i> Enter your PIN
+                        </label>
+                        <div class="login-row">
+                            <input type="text" id="loginPinInput" class="pin-input" maxlength="8"
+                                placeholder="B1A2C3D4" />
+                            <button id="loginBtn" class="btn btn-success">
+                                <i data-lucide="log-in"></i> Login
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="loginError" class="error-msg"></div>
+            </div>
+        </div>
+
+        <!-- ===== CHAT MENU ===== -->
+        <div id="chatMenu" class="chat-menu">
+            <div id="sidebar" class="sidebar">
+                <div class="sidebar-header">
+                    <span class="sidebar-logo">Quick<span>ie</span></span>
+                    <button id="sidebarCloseBtn" class="sidebar-close">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+
+                <div class="user-profile glass-inner">
+                    <div class="user-pin-display" id="userPinDisplay" title="Click to copy your PIN">
+                        PIN: <span>--------</span> <i data-lucide="copy"></i>
+                    </div>
+                    <div class="user-phone-display">
+                        <i data-lucide="smartphone"></i> <span id="userPhoneDisplay">+234 801 234 5678</span>
+                    </div>
+                    <div class="user-name-edit">
+                        <input type="text" id="userNameInput" placeholder="Your name (optional)" maxlength="20" />
+                        <button id="saveNameBtn" class="btn-small">
+                            <i data-lucide="save"></i> Save
+                        </button>
+                    </div>
+                </div>
+
+                <div id="pendingRequests" class="pending-requests">
+                    <div class="section-title">
+                        <i data-lucide="hourglass"></i> Pending Requests
+                    </div>
+                    <div id="pendingList"></div>
+                </div>
+
+                <div id="chatListContainer" class="chat-list-container"></div>
+
+                <div class="sidebar-footer">
+                    <div id="addFriendSection" class="add-friend-section">
+                        <button id="addFriendToggle" class="add-friend-toggle">
+                            <span class="toggle-label">
+                                <i data-lucide="user-plus"></i> Add Friend
+                            </span>
+                            <span class="toggle-icon">＋</span>
+                        </button>
+                        <div class="add-friend-hint">
+                            <i data-lucide="lightbulb"></i> Your PIN: <span id="hintPin">--------</span>
+                        </div>
+                        <div id="addFriendForm" class="add-friend-form-inline">
+                            <input type="text" id="inlineFriendPin" class="pin-input" maxlength="8"
+                                placeholder="Enter friend's PIN" />
+                            <input type="text" id="inlineFriendName" class="name-input" maxlength="20"
+                                placeholder="Friend's name (optional)" />
+                            <button id="inlineSendRequestBtn" class="btn btn-primary btn-block">
+                                <i data-lucide="send"></i> Send Request
+                            </button>
+                        </div>
+                    </div>
+
+                    <button id="logoutBtn" class="btn btn-secondary btn-block">
+                        <i data-lucide="log-out"></i> Logout
+                    </button>
+                </div>
+            </div>
+
+            <div id="sidebarOverlay" class="sidebar-overlay"></div>
+
+            <div class="main-chat">
+                <div class="chat-header glass-header">
+                    <button id="sidebarToggle" class="sidebar-toggle">
+                        <i data-lucide="menu"></i>
+                    </button>
+                    <div class="header-left">
+                        <span id="partnerName" class="partner-name">Select a chat</span>
+                        <span id="partnerPin" class="partner-pin"></span>
+                        <span id="statusDot" class="status-dot offline"></span>
+                        <span id="statusText" class="status-text">Offline</span>
+                    </div>
+                    <div class="header-right">
+                        <button id="searchBtn" class="header-btn" title="Search Messages">
+                            <i data-lucide="search"></i>
+                        </button>
+                        <button id="refreshBtn" class="header-btn" title="Refresh Chat">
+                            <i data-lucide="refresh-cw"></i>
+                        </button>
+                        <span class="badge">● Live</span>
+                        <button id="leaveBtn" class="leave-btn">
+                            <i data-lucide="log-out"></i> Leave
+                        </button>
+                    </div>
+                </div>
+
+                <div id="searchBar" class="search-bar">
+                    <input type="text" id="searchInput" placeholder="Search messages..." />
+                    <button id="searchCloseBtn" class="search-close">
+                        <i data-lucide="x"></i>
+                    </button>
+                    <div id="searchResults" class="search-results"></div>
+                </div>
+
+                <div id="messageList" class="chat-messages"></div>
+
+                <div id="typingIndicator" class="typing-indicator">
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                    <span class="typing-dot"></span>
+                </div>
+
+                <div id="quickReplies" class="quick-replies">
+                    <button class="quick-reply" data-text="OK 👍">OK 👍</button>
+                    <button class="quick-reply" data-text="On my way! 🚀">On my way! 🚀</button>
+                    <button class="quick-reply" data-text="Got it! ✅">Got it! ✅</button>
+                    <button class="quick-reply" data-text="Thank you! 🙏">Thank you! 🙏</button>
+                    <button class="quick-reply" data-text="😂 That's funny">😂 That's funny</button>
+                    <button class="quick-reply" data-text="❤️ Love it">❤️ Love it</button>
+                </div>
+
+                <div class="chat-input-area">
+                    <div class="input-row">
+                        <textarea id="chatInput" placeholder="Type a message..." rows="1" maxlength="1000"></textarea>
+                        <button id="sendBtn" class="send-btn">
+                            <i data-lucide="send"></i> Send
+                        </button>
+                    </div>
+                    <div class="toolbar-row">
+                        <button id="emojiBtn" class="icon-btn" title="Emoji">
+                            <i data-lucide="smile"></i>
+                        </button>
+                        <button id="imageBtn" class="icon-btn" title="Image">
+                            <i data-lucide="image"></i>
+                        </button>
+                        <button id="videoBtn" class="icon-btn" title="Video">
+                            <i data-lucide="video"></i>
+                        </button>
+                        <button id="audioBtn" class="icon-btn" title="Audio">
+                            <i data-lucide="music"></i>
+                        </button>
+                        <button id="fileBtn" class="icon-btn" title="File">
+                            <i data-lucide="paperclip"></i>
+                        </button>
+                        <button id="voiceBtn" class="icon-btn" title="Voice">
+                            <i data-lucide="mic"></i>
+                        </button>
+                    </div>
+                    <input type="file" id="fileInput" style="display:none" />
+                    <input type="file" id="imageInput" accept="image/*" style="display:none" />
+                    <input type="file" id="videoInput" accept="video/*" style="display:none" />
+                    <input type="file" id="audioInput" accept="audio/*" style="display:none" />
+                </div>
+
+                <!-- ===== EMOJI PICKER (Categorized + Search + Recent) ===== -->
+                <div id="emojiPicker" class="emoji-picker">
+                    <div class="emoji-header">
+                        <div class="emoji-search-wrap">
+                            <i data-lucide="search" class="emoji-search-icon"></i>
+                            <input type="text" id="emojiSearch" class="emoji-search" placeholder="Search emojis..." />
+                        </div>
+                    </div>
+
+                    <div class="emoji-tabs" id="emojiTabs">
+                        <button class="emoji-tab active" data-cat="recent" title="Recent">
+                            <i data-lucide="clock"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="smileys" title="Smileys">
+                            <i data-lucide="smile"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="people" title="People">
+                            <i data-lucide="users"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="animals" title="Animals">
+                            <i data-lucide="paw-print"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="food" title="Food">
+                            <i data-lucide="pizza"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="activity" title="Activity">
+                            <i data-lucide="trophy"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="travel" title="Travel">
+                            <i data-lucide="plane"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="objects" title="Objects">
+                            <i data-lucide="lightbulb"></i>
+                        </button>
+                        <button class="emoji-tab" data-cat="symbols" title="Symbols">
+                            <i data-lucide="heart"></i>
+                        </button>
+                    </div>
+
+                    <div class="emoji-body" id="emojiBody">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== MODALS ===== -->
+        <div id="imageModal" class="image-modal">
+            <span id="closeModal" class="close-modal">&times;</span>
+            <img id="modalImage" class="modal-image" src="" alt="Enlarged image" />
+            <a id="downloadBtn" class="download-btn" download>
+                <i data-lucide="download"></i> Download
+            </a>
+        </div>
+
+        <div id="voiceModal" class="voice-modal">
+            <div class="voice-modal-content glass-card">
+                <h3>
+                    <i data-lucide="mic"></i> Recording...
+                </h3>
+                <div class="voice-wave">
+                    <span></span><span></span><span></span>
+                    <span></span><span></span><span></span>
+                    <span></span><span></span><span></span>
+                    <span></span><span></span><span></span>
+                </div>
+                <div id="voiceTimer" class="voice-timer">0:00</div>
+                <div class="voice-actions">
+                    <button id="stopRecordingBtn" class="btn btn-danger">
+                        <i data-lucide="square"></i> Stop
+                    </button>
+                    <button id="cancelRecordingBtn" class="btn btn-secondary">
+                        <i data-lucide="x"></i> Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div id="audioPlayerModal" class="audio-player-modal">
+            <div class="audio-player-content glass-card">
+                <h3>
+                    <i data-lucide="music"></i> Voice Message
+                </h3>
+                <audio id="audioPlayer" controls></audio>
+                <button id="closeAudioBtn" class="btn btn-secondary">
+                    <i data-lucide="x"></i> Close
+                </button>
+            </div>
+        </div>
+
+        <video id="thumbExtractor" style="display:none" muted playsinline preload="metadata"></video>
+
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
