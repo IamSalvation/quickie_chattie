@@ -89,7 +89,6 @@
     const MAX_VOICE_SECONDS = 120;
 
     // ===== LUCIDE ICON HELPER =====
-    // Call after any DOM update that adds <i data-lucide="...">
     function refreshIcons() {
         if (window.lucide && typeof window.lucide.createIcons === 'function') {
             window.lucide.createIcons();
@@ -159,7 +158,7 @@
         ]
     };
 
-    // ===== RECENT EMOJIS (localStorage) =====
+    // ===== RECENT EMOJIS =====
     const RECENT_KEY = 'quickie_recent_emojis';
     const RECENT_LIMIT = 16;
 
@@ -231,7 +230,6 @@
     }
 
     // ===== FILE ICON MAPPING =====
-    // Returns { name: 'image'|'video'|..., colorClass: 'icon-image'|... }
     function getFileIconInfo(fileName, fileType) {
         const ext = (fileName || '').split('.').pop().toLowerCase();
         const t = (fileType || '').toLowerCase();
@@ -382,8 +380,31 @@
             if (myName) userNameInput.value = myName;
             if (hintPin) hintPin.textContent = pin;
             setError('');
-            loadChats();
+
+            // Chats will arrive via 'server-chats' event — no localStorage load needed
+            if (socket) socket.emit('get-pending-requests', { pin: myPin });
             refreshIcons();
+        });
+
+        // ===== SERVER-SYNCED CHAT LIST =====
+        socket.on('server-chats', (serverChats) => {
+            console.log('📥 Received', serverChats.length, 'chats from server');
+            allChats = serverChats || [];
+            saveChatsToLocal();
+            renderChatList();
+
+            // If current chat no longer exists on server, clear it
+            if (currentChatId && !allChats.find(c => c.chatId === currentChatId)) {
+                currentChatId = null;
+                currentPartnerPin = null;
+                currentPartnerName = '';
+                partnerName.textContent = 'Select a chat';
+                partnerPin.textContent = '';
+                statusDot.className = 'status-dot offline';
+                statusText.textContent = 'Offline';
+                messageList.innerHTML = '';
+                allMessages = [];
+            }
         });
 
         socket.on('chat-statuses', (statuses) => {
@@ -466,7 +487,10 @@
                 return;
             }
             allMessages.push(msg);
-            displayMessage(msg);
+            if (msg.chatId === currentChatId) {
+                displayMessage(msg);
+            }
+            updateChatPreview(msg.chatId, msg.text || 'Message', msg.timestamp);
             playNotificationSound();
         });
 
@@ -497,8 +521,7 @@
             if (msg.chatId === currentChatId) {
                 appendFileMessage(msg.fileData, msg.fileName, msg.fileSize, msg.fileType, 'other', msg.id, msg.timestamp);
             }
-            const info = getFileIconInfo(msg.fileName, msg.fileType);
-            updateChatPreview(msg.chatId, `${info.name} ${msg.fileName}`, msg.timestamp);
+            updateChatPreview(msg.chatId, `📎 ${msg.fileName}`, msg.timestamp);
             playNotificationSound();
         });
 
@@ -531,9 +554,7 @@
                 duration: msg.duration || 0, from: msg.from, timestamp: msg.timestamp, type: 'audio', deleted: false
             };
             allMessages.push(data);
-            if (msg.chatId === currentChatId) {
-                appendAudioMessage(msg.audioData, msg.fileName, msg.fileSize, msg.duration, 'other', msg.id, msg.timestamp);
-            }
+            if (msg.chatId === currentChatId) appendAudioMessage(msg.audioData, msg.fileName, msg.fileSize, msg.duration, 'other', msg.id, msg.timestamp);
             updateChatPreview(msg.chatId, '🎵 Audio', msg.timestamp);
             playNotificationSound();
         });
@@ -563,7 +584,10 @@
                     currentPartnerName = '';
                     partnerName.textContent = 'Select a chat';
                     partnerPin.textContent = '';
+                    statusDot.className = 'status-dot offline';
+                    statusText.textContent = 'Offline';
                     messageList.innerHTML = '';
+                    allMessages = [];
                 }
             }
         });
@@ -578,7 +602,10 @@
                 currentPartnerName = '';
                 partnerName.textContent = 'Select a chat';
                 partnerPin.textContent = '';
+                statusDot.className = 'status-dot offline';
+                statusText.textContent = 'Offline';
                 messageList.innerHTML = '';
+                allMessages = [];
             }
         });
 
@@ -597,6 +624,7 @@
         });
 
         socket.on('error', (msg) => {
+            console.error('❌ Server error:', msg);
             setError('❌ ' + msg);
         });
 
@@ -606,13 +634,13 @@
     }
 
     // ===== Load Chats =====
+    // Now mostly a cache; server sends authoritative list on register
     function loadChats() {
         const saved = localStorage.getItem('quickie_chats_' + myPin);
         if (saved) {
             try { allChats = JSON.parse(saved); } catch (e) { allChats = []; }
         }
         renderChatList();
-        if (socket) socket.emit('get-pending-requests', { pin: myPin });
     }
 
     function saveChatsToLocal() {
@@ -771,7 +799,10 @@
                         currentPartnerName = '';
                         partnerName.textContent = 'Select a chat';
                         partnerPin.textContent = '';
+                        statusDot.className = 'status-dot offline';
+                        statusText.textContent = 'Offline';
                         messageList.innerHTML = '';
+                        allMessages = [];
                     }
                 }
             });
@@ -796,6 +827,7 @@
     }
 
     function switchChat(chatId, pin, name) {
+        console.log('🔀 Switching to chat:', chatId, pin, name);
         currentChatId = chatId;
         currentPartnerPin = pin;
         currentPartnerName = name;
@@ -854,24 +886,69 @@
         if (myPin) copyToClipboard(myPin, '✅ Your PIN copied!');
     });
 
+    // ===== Logout (FULL UI RESET) =====
     logoutBtn.addEventListener('click', function () {
         if (confirm('Logout?')) {
             const savedPin = myPin;
-            myPin = null; myPhone = null; myName = '';
-            allChats = []; allMessages = []; pendingRequests = [];
-            currentChatId = null; currentPartnerPin = null; currentPartnerName = '';
+            myPin = null;
+            myPhone = null;
+            myName = '';
+            allChats = [];
+            allMessages = [];
+            pendingRequests = [];
+            currentChatId = null;
+            currentPartnerPin = null;
+            currentPartnerName = '';
             partnerStatuses.clear();
+            loginAttempted = false;
+
+            // === FULL UI RESET ===
             chatMenu.classList.remove('active');
             loginScreen.style.display = 'flex';
+
+            // Reset main chat header
+            partnerName.textContent = 'Select a chat';
+            partnerPin.textContent = '';
+            statusDot.className = 'status-dot offline';
+            statusText.textContent = 'Offline';
+
+            // Reset message list
+            messageList.innerHTML = '';
+
+            // Reset input
+            chatInput.value = '';
+            chatInput.style.height = 'auto';
+
+            // Reset sidebar lists
+            chatListContainer.innerHTML = '';
+            pendingList.innerHTML = '';
+
+            // Reset login form
             loginPinInput.value = '';
             loginPinInput.focus();
             pinDisplay.textContent = '- - - - - - - -';
             pinDisplayArea.classList.add('hidden');
             copyPinBtn.classList.add('hidden');
             loginAfterGenerateBtn.classList.add('hidden');
+
+            // Reset add friend section
             if (addFriendSection) addFriendSection.classList.remove('expanded');
+
+            // Close emoji picker if open
+            if (emojiPicker) emojiPicker.classList.remove('show');
+
+            // Close search if open
+            if (searchBar) searchBar.classList.remove('show');
+            if (searchResults) searchResults.classList.remove('show');
+            if (searchInput) searchInput.value = '';
+
+            // Disconnect socket
             if (socket) socket.disconnect();
+
+            // Clear cached chats
             if (savedPin) localStorage.removeItem('quickie_chats_' + savedPin);
+
+            console.log('👋 Logged out');
         }
     });
 
@@ -903,11 +980,22 @@
     // ===== Send Message =====
     function sendMessage() {
         const text = chatInput.value.trim();
-        if (!text || !currentChatId || !socket) return;
+
+        if (!text) return;
+        if (!socket || !socket.connected) {
+            setError('⚠️ Not connected to server');
+            return;
+        }
+        if (!currentChatId) {
+            setError('⚠️ Please select a chat from the sidebar first');
+            return;
+        }
+
         const messageId = ++messageIdCounter;
         const messageData = { id: messageId, text, from: myPin, timestamp: Date.now(), type: 'text', deleted: false };
         allMessages.push(messageData);
         appendMessage(text, 'me', messageId);
+
         const chat = allChats.find(c => c.chatId === currentChatId);
         if (chat) {
             chat.lastMessage = text;
@@ -915,6 +1003,7 @@
             renderChatList();
             saveChatsToLocal();
         }
+
         socket.emit('chat-message', { chatId: currentChatId, text, messageId, fromPin: myPin });
         chatInput.value = '';
         chatInput.style.height = 'auto';
@@ -954,7 +1043,10 @@
             currentPartnerName = '';
             partnerName.textContent = 'Select a chat';
             partnerPin.textContent = '';
+            statusDot.className = 'status-dot offline';
+            statusText.textContent = 'Offline';
             messageList.innerHTML = '';
+            allMessages = [];
         }
     });
 
@@ -1060,7 +1152,6 @@
         scrollToBottom();
     }
 
-    // ===== IMAGE with download =====
     function appendImage(imageData, type, messageId = null, timestamp = null, fileName = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
@@ -1104,7 +1195,6 @@
         scrollToBottom();
     }
 
-    // ===== FILE with download =====
     function appendFileMessage(fileData, fileName, fileSize, fileType, type, messageId = null, timestamp = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
@@ -1153,7 +1243,6 @@
         scrollToBottom();
     }
 
-    // ===== VIDEO with download =====
     function appendVideoMessage(videoData, fileName, fileSize, thumbnail, type, messageId = null, timestamp = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
@@ -1218,7 +1307,6 @@
         scrollToBottom();
     }
 
-    // ===== AUDIO with waveform + download =====
     function appendAudioMessage(audioData, fileName, fileSize, duration, type, messageId = null, timestamp = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
@@ -1322,7 +1410,6 @@
         scrollToBottom();
     }
 
-    // ===== VOICE with download =====
     function appendVoiceMessage(audioData, duration, type, messageId = null, timestamp = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
@@ -1430,7 +1517,6 @@
 
         div.appendChild(audioContainer);
 
-        // Voice download button row
         const dlRow = document.createElement('div');
         dlRow.className = 'voice-actions-row';
         const dlBtn = document.createElement('button');
@@ -1609,8 +1695,7 @@
             appendFileMessage(fileData, file.name, fileSize, file.type, 'me', messageId);
             const chat = allChats.find(c => c.chatId === currentChatId);
             if (chat) {
-                const info = getFileIconInfo(file.name, file.type);
-                chat.lastMessage = `${info.name} ${file.name}`;
+                chat.lastMessage = `📎 ${file.name}`;
                 chat.lastTimestamp = Date.now();
                 renderChatList(); saveChatsToLocal();
             }
@@ -1782,18 +1867,13 @@
 
         let emojis = [];
         if (searchTerm) {
-            // Search across all categories
             const lower = searchTerm.toLowerCase();
             const all = Object.values(EMOJI_DATA).flat();
-            // Simple keyword matching using category keys as the search index
-            // (Real keyword search would need an emoji-name map; this catches category matches)
             if (lower.length > 0) {
-                // Match against category name
                 const matchedCats = Object.keys(EMOJI_DATA).filter(c => c.includes(lower));
                 if (matchedCats.length > 0) {
                     matchedCats.forEach(c => emojis.push(...EMOJI_DATA[c]));
                 } else {
-                    // Fallback: show all emojis
                     emojis = all;
                 }
             }
@@ -1976,13 +2056,11 @@
     loginPinInput.focus();
     connectSocket();
 
-    // Initial icon render
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', refreshIcons);
     } else {
         refreshIcons();
     }
-    // Backup for slow-loading Lucide
     setTimeout(refreshIcons, 500);
 
 })();
