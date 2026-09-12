@@ -12,6 +12,23 @@
     <!-- Lucide Icons -->
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
     <link rel="stylesheet" href="style.css" />
+
+    <!-- PWA: Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+
+    <!-- PWA: Theme color for Android -->
+    <meta name="theme-color" content="#764ba2" />
+
+    <!-- PWA: iOS-specific meta tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Quickie" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+
+    <!-- PWA: Favicon for browser tabs -->
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icons/favicon-16x16.png" />
+    <link rel="shortcut icon" href="/icons/favicon.ico" />
 </head>
 
 <body>
@@ -229,7 +246,6 @@
                     <input type="file" id="audioInput" accept="audio/*" style="display:none" />
                 </div>
 
-                <!-- ===== EMOJI PICKER (Categorized + Search + Recent) ===== -->
                 <div id="emojiPicker" class="emoji-picker">
                     <div class="emoji-header">
                         <div class="emoji-search-wrap">
@@ -268,9 +284,7 @@
                         </button>
                     </div>
 
-                    <div class="emoji-body" id="emojiBody">
-                        <!-- Populated by JS -->
-                    </div>
+                    <div class="emoji-body" id="emojiBody"></div>
                 </div>
             </div>
         </div>

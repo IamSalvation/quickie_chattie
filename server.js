@@ -9,7 +9,20 @@ const io = new Server(server, {
     maxHttpBufferSize: 1.5e7 // 15 MB (10 MB file + base64 overhead + headroom)
 });
 
-app.use(express.static('public'));
+// ===== STATIC FILES (with PWA headers) =====
+app.use(express.static('public', {
+    setHeaders: (res, filePath) => {
+        // Manifest: correct MIME type so browsers recognize it as a PWA manifest
+        if (filePath.endsWith('manifest.json') || filePath.endsWith('.webmanifest')) {
+            res.setHeader('Content-Type', 'application/manifest+json');
+        }
+        // Service worker: never cache, allow scope from root
+        if (filePath.endsWith('sw.js')) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+            res.setHeader('Service-Worker-Allowed', '/');
+        }
+    }
+}));
 
 // ===== CONSTANTS =====
 const MAX_FILE_BYTES = 10 * 1024 * 1024;      // 10 MB
@@ -237,12 +250,10 @@ io.on('connection', (socket) => {
             const serverChats = [];
             if (user.chats && user.chats.length > 0) {
                 for (const chat of user.chats) {
-                    // Validate chat still exists
                     let chatData = null;
                     try {
                         chatData = await Chat.findById(chat.chatId);
                     } catch (e) {
-                        // Invalid ObjectId — skip
                         continue;
                     }
                     if (!chatData) continue;
