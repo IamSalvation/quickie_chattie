@@ -5,8 +5,15 @@ const mongoose = require('mongoose');
 
 const app = express();
 const server = http.createServer(app);
+
+// ===== SOCKET.IO CONFIG (with mobile resilience) =====
 const io = new Server(server, {
-    maxHttpBufferSize: 1.5e7 // 15 MB (10 MB file + base64 overhead + headroom)
+    maxHttpBufferSize: 1.5e7,       // 15 MB (10 MB file + base64 overhead + headroom)
+    pingTimeout: 8000,               // FIX: detect dead sockets faster (was 20s default)
+    pingInterval: 4000,              // FIX: ping every 4s to keep connection fresh
+    upgradeTimeout: 5000,            // FIX: faster upgrade polling → websocket
+    transports: ['websocket', 'polling'],  // FIX: try websocket first, fall back to polling
+    connectTimeout: 20000            // 20s to establish connection
 });
 
 // ===== STATIC FILES (with PWA headers) =====
@@ -215,7 +222,7 @@ io.on('connection', (socket) => {
             await user.save();
 
             socket.join(`user_${pin}`);
-            console.log(`✅ User ${pin} registered - ONLINE`);
+            console.log(`✅ User ${pin} registered - ONLINE (socket: ${socket.id})`);
 
             socket.emit('registered', {
                 pin,
@@ -278,13 +285,11 @@ io.on('connection', (socket) => {
 
             // Send pending requests
             const pendingReqs = await Pending.find({ toPin: pin });
-            if (pendingReqs.length > 0) {
-                socket.emit('pending-requests', pendingReqs.map(r => ({
-                    fromPin: r.fromPin,
-                    fromName: r.fromName,
-                    timestamp: r.timestamp.getTime()
-                })));
-            }
+            socket.emit('pending-requests', pendingReqs.map(r => ({
+                fromPin: r.fromPin,
+                fromName: r.fromName,
+                timestamp: r.timestamp.getTime()
+            })));
         } catch (err) {
             console.error('Register error:', err);
             socket.emit('error', 'Server error during registration');
@@ -345,6 +350,7 @@ io.on('connection', (socket) => {
 
     socket.on('send-request', async ({ fromPin, toPin, fromName }) => {
         try {
+            console.log(`📨 send-request: ${fromPin} → ${toPin} (${fromName})`);
             const toUser = await User.findOne({ pin: toPin });
             if (!toUser) return socket.emit('error', 'User not found');
             if (fromPin === toPin) return socket.emit('error', 'Cannot add yourself');
@@ -364,11 +370,14 @@ io.on('connection', (socket) => {
 
             await Pending.create({ fromPin, toPin, fromName: fromName || 'User' });
 
+            // Emit to recipient's room (works even if they reconnect)
             io.to(`user_${toPin}`).emit('new-request', {
                 fromPin,
                 fromName: fromName || 'User',
                 timestamp: Date.now()
             });
+
+            // Also send directly to their current socket for redundancy
             if (toUser.socketId) {
                 const targetSocket = io.sockets.sockets.get(toUser.socketId);
                 if (targetSocket) {
@@ -377,8 +386,14 @@ io.on('connection', (socket) => {
                         fromName: fromName || 'User',
                         timestamp: Date.now()
                     });
+                    console.log(`   ✓ Delivered directly to socket ${toUser.socketId}`);
+                } else {
+                    console.log(`   ⚠️  Recipient socket ${toUser.socketId} not found — queued in DB`);
                 }
+            } else {
+                console.log(`   ⚠️  Recipient offline — queued in DB`);
             }
+
             socket.emit('request-sent', { toPin, toName: toUser.name || 'User' });
         } catch (err) {
             console.error('Send request error:', err);
