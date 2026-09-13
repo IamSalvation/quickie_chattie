@@ -5,6 +5,10 @@
     const loginScreen = document.getElementById('loginScreen');
     const chatMenu = document.getElementById('chatMenu');
     const phoneInput = document.getElementById('phoneInput');
+    const passwordInput = document.getElementById('passwordInput');
+    const passwordStrength = document.getElementById('passwordStrength');
+    const passwordStrengthBar = document.getElementById('passwordStrengthBar');
+    const passwordStrengthText = document.getElementById('passwordStrengthText');
     const generatePinBtn = document.getElementById('generatePinBtn');
     const recoverPinBtn = document.getElementById('recoverPinBtn');
     const pinDisplayArea = document.getElementById('pinDisplayArea');
@@ -55,6 +59,34 @@
     const darkModeToggle = document.getElementById('darkModeToggle');
     const refreshBtn = document.getElementById('refreshBtn');
 
+    // ===== Auth Modal Elements =====
+    const passwordPromptModal = document.getElementById('passwordPromptModal');
+    const passwordPromptInput = document.getElementById('passwordPromptInput');
+    const passwordPromptSubmit = document.getElementById('passwordPromptSubmit');
+    const passwordPromptCancel = document.getElementById('passwordPromptCancel');
+    const passwordPromptPin = document.getElementById('passwordPromptPin');
+    const forgotPasswordModal = document.getElementById('forgotPasswordModal');
+    const forgotPasswordClose = document.getElementById('forgotPasswordClose');
+    const forgotPasswordPhone = document.getElementById('forgotPasswordPhone');
+    const forgotPasswordPassword = document.getElementById('forgotPasswordPassword');
+    const forgotPasswordRecoverBtn = document.getElementById('forgotPasswordRecoverBtn');
+    const forgotPasswordStartFreshBtn = document.getElementById('forgotPasswordStartFreshBtn');
+    const forgotPasswordError = document.getElementById('forgotPasswordError');
+    const forgotPasswordPinReveal = document.getElementById('forgotPasswordPinReveal');
+    const forgotPasswordPinValue = document.getElementById('forgotPasswordPinValue');
+
+    // ===== Reply Preview Bar =====
+    const replyPreviewBar = document.getElementById('replyPreviewBar');
+    const replyPreviewName = document.getElementById('replyPreviewName');
+    const replyPreviewText = document.getElementById('replyPreviewText');
+    const replyPreviewClose = document.getElementById('replyPreviewClose');
+
+    // ===== Message Context Menu =====
+    const messageContextMenu = document.getElementById('messageContextMenu');
+    const ctxReplyBtn = document.getElementById('ctxReplyBtn');
+    const ctxDeleteBtn = document.getElementById('ctxDeleteBtn');
+    const ctxCancelBtn = document.getElementById('ctxCancelBtn');
+
     // ===== Add Friend Inline =====
     const addFriendSection = document.getElementById('addFriendSection');
     const addFriendToggle = document.getElementById('addFriendToggle');
@@ -83,10 +115,18 @@
     let recordingSeconds = 0;
     let isRecording = false;
     let currentEmojiCategory = 'recent';
+    let pendingDeviceToken = null; // Set during new device login flow
+    let pendingPin = null;
+    let replyingTo = null; // { id, text, from, type, image, fileName }
+    let contextMenuMessageId = null; // which message the context menu is open for
+    let contextMenuMessage = null;
 
     const partnerStatuses = new Map();
     const MAX_FILE_BYTES = 10 * 1024 * 1024;
     const MAX_VOICE_SECONDS = 120;
+
+    const DEVICE_TOKEN_KEY = 'quickie_device_token';
+    const SUPPORT_WHATSAPP = '+2347062547022'; // ← change this to your WhatsApp number
 
     // ===== LUCIDE ICON HELPER =====
     function refreshIcons() {
@@ -163,9 +203,7 @@
     const RECENT_LIMIT = 16;
 
     function getRecentEmojis() {
-        try {
-            return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]');
-        } catch (e) { return []; }
+        try { return JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); } catch (e) { return []; }
     }
 
     function addRecentEmoji(emoji) {
@@ -229,6 +267,47 @@
         return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     }
 
+    // ===== DEVICE TOKEN =====
+    function getStoredDeviceToken() {
+        try { return localStorage.getItem(DEVICE_TOKEN_KEY) || null; } catch (e) { return null; }
+    }
+
+    function storeDeviceToken(token) {
+        try { localStorage.setItem(DEVICE_TOKEN_KEY, token); } catch (e) { }
+    }
+
+    // ===== PASSWORD STRENGTH =====
+    function checkPasswordStrength(pw) {
+        if (!pw) return { score: 0, label: '', color: '' };
+        let score = 0;
+        if (pw.length >= 8) score++;
+        if (pw.length >= 12) score++;
+        if (/[a-z]/.test(pw) && /[A-Z]/.test(pw)) score++;
+        if (/\d/.test(pw)) score++;
+        if (/[^a-zA-Z0-9]/.test(pw)) score++;
+
+        if (score <= 1) return { score: 1, label: 'Weak', color: '#ef4444' };
+        if (score === 2) return { score: 2, label: 'Fair', color: '#f59e0b' };
+        if (score === 3) return { score: 3, label: 'Good', color: '#10b981' };
+        return { score: 4, label: 'Strong', color: '#059669' };
+    }
+
+    function updatePasswordStrength() {
+        if (!passwordStrength || !passwordStrengthBar || !passwordStrengthText) return;
+        const pw = passwordInput.value;
+        if (!pw) {
+            passwordStrength.style.display = 'none';
+            return;
+        }
+        passwordStrength.style.display = 'block';
+        const s = checkPasswordStrength(pw);
+        const pct = (s.score / 4) * 100;
+        passwordStrengthBar.style.width = pct + '%';
+        passwordStrengthBar.style.background = s.color;
+        passwordStrengthText.textContent = s.label;
+        passwordStrengthText.style.color = s.color;
+    }
+
     // ===== FILE ICON MAPPING =====
     function getFileIconInfo(fileName, fileType) {
         const ext = (fileName || '').split('.').pop().toLowerCase();
@@ -287,35 +366,59 @@
         return `quickie-image-${timestamp || Date.now()}.jpg`;
     }
 
-    // ===== PIN Generation =====
-    async function handlePinAction(action) {
+    // ===== SIGNUP: phone + password → PIN + device token =====
+    async function handleSignup() {
         const phone = cleanPhone(phoneInput.value);
+        const password = passwordInput.value;
+
         if (!phone || phone.length < 7) {
             setError('Please enter a valid phone number');
             return;
         }
+        if (!password || password.length < 8 || !/\d/.test(password)) {
+            setError('Password must be 8+ characters with at least 1 number');
+            return;
+        }
+
         try {
-            const res = await fetch(`/pin?phone=${encodeURIComponent(phone)}&action=${action}`);
+            const res = await fetch('/signup', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phone, password })
+            });
             const data = await res.json();
+
             if (res.ok) {
                 myPin = data.pin;
-                myPhone = phone;
+                myPhone = data.phone || phone;
+                storeDeviceToken(data.deviceToken);
+
                 pinDisplay.textContent = myPin;
                 pinDisplayArea.classList.remove('hidden');
                 copyPinBtn.classList.remove('hidden');
                 loginAfterGenerateBtn.classList.remove('hidden');
-                setError(data.message);
-                if (action === 'generate') loginWithPin(myPin);
+                setError(data.message || 'Account created!');
+
+                // Auto-login
+                loginWithPin(myPin);
+            } else if (res.status === 409 && data.pin) {
+                // Account exists — send to login
+                setError('Account already exists. Please use login.');
+                loginPinInput.focus();
             } else {
                 setError(data.error || 'Something went wrong');
             }
         } catch (e) {
+            console.error(e);
             setError('Network error. Is the server running?');
         }
     }
 
-    generatePinBtn.addEventListener('click', () => handlePinAction('generate'));
-    recoverPinBtn.addEventListener('click', () => handlePinAction('recover'));
+    generatePinBtn.addEventListener('click', handleSignup);
+
+    if (passwordInput) {
+        passwordInput.addEventListener('input', updatePasswordStrength);
+    }
 
     copyPinBtn.addEventListener('click', function () {
         copyToClipboard(myPin, '✅ PIN copied!');
@@ -325,20 +428,165 @@
         if (myPin) loginWithPin(myPin);
     });
 
-    // ===== Login =====
-    loginBtn.addEventListener('click', function () {
+    // ===== LOGIN FLOW =====
+    loginBtn.addEventListener('click', async function () {
         const pin = loginPinInput.value.trim().toUpperCase();
         if (!pin || pin.length !== 8) {
             setError('Please enter a valid 8-character PIN');
             return;
         }
-        loginWithPin(pin);
+        await attemptLogin(pin);
     });
 
     loginPinInput.addEventListener('keydown', function (e) {
         if (e.key === 'Enter') loginBtn.click();
     });
 
+    async function attemptLogin(pin) {
+        const deviceToken = getStoredDeviceToken();
+        try {
+            const res = await fetch('/login-check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pin, deviceToken })
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+                setError(data.error || 'Login failed');
+                return;
+            }
+
+            if (!data.requiresPassword) {
+                // Device trusted — straight login
+                myPin = pin;
+                myPhone = data.phone || myPhone;
+                loginWithPin(pin);
+                return;
+            }
+
+            // Password required — show prompt
+            pendingPin = pin;
+            passwordPromptPin.textContent = pin;
+            passwordPromptInput.value = '';
+            passwordPromptModal.classList.add('show');
+            setTimeout(() => passwordPromptInput.focus(), 100);
+            refreshIcons();
+        } catch (e) {
+            console.error(e);
+            setError('Network error. Is the server running?');
+        }
+    }
+
+    // Password prompt submit
+    passwordPromptSubmit.addEventListener('click', async function () {
+        const password = passwordPromptInput.value;
+        if (!password) {
+            passwordPromptInput.focus();
+            return;
+        }
+        try {
+            const res = await fetch('/login-verify', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pin: pendingPin, password })
+            });
+            const data = await res.json();
+
+            if (!res.ok) {
+                passwordPromptInput.value = '';
+                passwordPromptInput.focus();
+                passwordPromptInput.style.borderColor = '#ef4444';
+                setTimeout(() => { passwordPromptInput.style.borderColor = ''; }, 1000);
+                setError(data.error || 'Incorrect password');
+                return;
+            }
+
+            // Success — store new device token, log in
+            storeDeviceToken(data.deviceToken);
+            passwordPromptModal.classList.remove('show');
+            myPin = pendingPin;
+            myPhone = data.phone || myPhone;
+            pendingPin = null;
+            loginWithPin(myPin);
+        } catch (e) {
+            console.error(e);
+            setError('Network error');
+        }
+    });
+
+    passwordPromptInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') passwordPromptSubmit.click();
+    });
+
+    passwordPromptCancel.addEventListener('click', function () {
+        passwordPromptModal.classList.remove('show');
+        passwordPromptInput.value = '';
+        pendingPin = null;
+    });
+
+    // ===== FORGOT PASSWORD FLOW =====
+    recoverPinBtn.addEventListener('click', function () {
+        forgotPasswordPhone.value = phoneInput.value || '';
+        forgotPasswordPassword.value = '';
+        forgotPasswordError.textContent = '';
+        forgotPasswordPinReveal.classList.add('hidden');
+        forgotPasswordModal.classList.add('show');
+        setTimeout(() => forgotPasswordPhone.focus(), 100);
+        refreshIcons();
+    });
+
+    forgotPasswordClose.addEventListener('click', function () {
+        forgotPasswordModal.classList.remove('show');
+    });
+
+    forgotPasswordRecoverBtn.addEventListener('click', async function () {
+        const phone = cleanPhone(forgotPasswordPhone.value);
+        const password = forgotPasswordPassword.value;
+        if (!phone || !password) {
+            forgotPasswordError.textContent = 'Enter phone and password';
+            return;
+        }
+        forgotPasswordError.textContent = '';
+        try {
+            const res = await fetch('/recover-pin', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phone, password })
+            });
+            const data = await res.json();
+            if (res.ok) {
+                forgotPasswordPinValue.textContent = data.pin;
+                forgotPasswordPinReveal.classList.remove('hidden');
+            } else {
+                forgotPasswordError.textContent = data.error || 'Recovery failed';
+            }
+        } catch (e) {
+            forgotPasswordError.textContent = 'Network error';
+        }
+    });
+
+    forgotPasswordStartFreshBtn.addEventListener('click', function () {
+        const confirmed = confirm(
+            'Start Fresh will PERMANENTLY DELETE your account.\n\n' +
+            'All your chats, messages, and friends will be gone.\n\n' +
+            'You will be asked to create a new PIN.\n\n' +
+            'Are you sure?'
+        );
+        if (!confirmed) return;
+
+        // Reset the login form and focus on phone input
+        forgotPasswordModal.classList.remove('show');
+        pinDisplayArea.classList.add('hidden');
+        copyPinBtn.classList.add('hidden');
+        loginAfterGenerateBtn.classList.add('hidden');
+        phoneInput.value = '';
+        passwordInput.value = '';
+        phoneInput.focus();
+        setError('Enter your phone number and choose a new password to create a new account');
+    });
+
+    // ===== LOGIN VIA SOCKET =====
     let loginAttempted = false;
 
     function loginWithPin(pin) {
@@ -367,6 +615,15 @@
             setError('⚠️ Cannot reach server. Make sure server is running.');
         });
 
+        socket.on('kicked', ({ reason }) => {
+            console.log('🔴 Kicked:', reason);
+            alert('⚠️ ' + reason + '\n\nYou will be logged out.');
+            setTimeout(() => {
+                // Force logout UI reset
+                doLogout();
+            }, 100);
+        });
+
         socket.on('registered', ({ pin, name, phone }) => {
             console.log('✅ Registered:', pin, name);
             myName = name || '';
@@ -380,20 +637,15 @@
             if (myName) userNameInput.value = myName;
             if (hintPin) hintPin.textContent = pin;
             setError('');
-
-            // Chats will arrive via 'server-chats' event — no localStorage load needed
             if (socket) socket.emit('get-pending-requests', { pin: myPin });
             refreshIcons();
         });
 
-        // ===== SERVER-SYNCED CHAT LIST =====
         socket.on('server-chats', (serverChats) => {
             console.log('📥 Received', serverChats.length, 'chats from server');
             allChats = serverChats || [];
             saveChatsToLocal();
             renderChatList();
-
-            // If current chat no longer exists on server, clear it
             if (currentChatId && !allChats.find(c => c.chatId === currentChatId)) {
                 currentChatId = null;
                 currentPartnerPin = null;
@@ -469,6 +721,7 @@
         });
 
         socket.on('chat-history', ({ chatId, messages }) => {
+            if (chatId !== currentChatId) return;
             if (isFirstHistoryLoad) {
                 messageList.innerHTML = '';
                 allMessages = [];
@@ -478,10 +731,15 @@
             allMessages.forEach(msg => displayMessage(msg));
             refreshIcons();
             scrollToBottom();
+            // Auto-mark as seen
+            if (socket && myPin && currentChatId) {
+                socket.emit('mark-seen', { chatId: currentChatId, pin: myPin });
+            }
         });
 
         socket.on('chat-message', (msg) => {
             if (msg.from === myPin) return;
+            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('This message was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -489,6 +747,7 @@
             allMessages.push(msg);
             if (msg.chatId === currentChatId) {
                 displayMessage(msg);
+                if (socket && myPin) socket.emit('mark-seen', { chatId: msg.chatId, pin: myPin });
             }
             updateChatPreview(msg.chatId, msg.text || 'Message', msg.timestamp);
             playNotificationSound();
@@ -496,30 +755,33 @@
 
         socket.on('chat-image', (msg) => {
             if (msg.from === myPin) return;
+            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Image was deleted', 'other', msg.id, msg.timestamp);
                 return;
             }
-            const data = { id: msg.id, image: msg.image, fileName: msg.fileName, from: msg.from, timestamp: msg.timestamp, type: 'image', deleted: false };
+            const data = { id: msg.id, image: msg.image, fileName: msg.fileName, from: msg.from, timestamp: msg.timestamp, type: 'image', deleted: false, deliveredTo: msg.deliveredTo || [], seenBy: msg.seenBy || [], replyTo: msg.replyTo || null };
             allMessages.push(data);
-            if (msg.chatId === currentChatId) appendImage(msg.image, 'other', msg.id, msg.timestamp, msg.fileName);
+            if (msg.chatId === currentChatId) appendImage(msg.image, 'other', msg.id, msg.timestamp, msg.fileName, msg.replyTo);
             updateChatPreview(msg.chatId, '📸 Image', msg.timestamp);
             playNotificationSound();
         });
 
         socket.on('chat-file', (msg) => {
             if (msg.from === myPin) return;
+            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('File was deleted', 'other', msg.id, msg.timestamp);
                 return;
             }
             const data = {
                 id: msg.id, fileData: msg.fileData, fileName: msg.fileName, fileSize: msg.fileSize,
-                fileType: msg.fileType, from: msg.from, timestamp: msg.timestamp, type: 'file', deleted: false
+                fileType: msg.fileType, from: msg.from, timestamp: msg.timestamp, type: 'file', deleted: false,
+                deliveredTo: msg.deliveredTo || [], seenBy: msg.seenBy || [], replyTo: msg.replyTo || null
             };
             allMessages.push(data);
             if (msg.chatId === currentChatId) {
-                appendFileMessage(msg.fileData, msg.fileName, msg.fileSize, msg.fileType, 'other', msg.id, msg.timestamp);
+                appendFileMessage(msg.fileData, msg.fileName, msg.fileSize, msg.fileType, 'other', msg.id, msg.timestamp, msg.replyTo);
             }
             updateChatPreview(msg.chatId, `📎 ${msg.fileName}`, msg.timestamp);
             playNotificationSound();
@@ -527,17 +789,19 @@
 
         socket.on('chat-video', (msg) => {
             if (msg.from === myPin) return;
+            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Video was deleted', 'other', msg.id, msg.timestamp);
                 return;
             }
             const data = {
                 id: msg.id, videoData: msg.videoData, fileName: msg.fileName, fileSize: msg.fileSize,
-                thumbnail: msg.thumbnail, from: msg.from, timestamp: msg.timestamp, type: 'video', deleted: false
+                thumbnail: msg.thumbnail, from: msg.from, timestamp: msg.timestamp, type: 'video', deleted: false,
+                deliveredTo: msg.deliveredTo || [], seenBy: msg.seenBy || [], replyTo: msg.replyTo || null
             };
             allMessages.push(data);
             if (msg.chatId === currentChatId) {
-                appendVideoMessage(msg.videoData, msg.fileName, msg.fileSize, msg.thumbnail, 'other', msg.id, msg.timestamp);
+                appendVideoMessage(msg.videoData, msg.fileName, msg.fileSize, msg.thumbnail, 'other', msg.id, msg.timestamp, msg.replyTo);
             }
             updateChatPreview(msg.chatId, '🎬 Video', msg.timestamp);
             playNotificationSound();
@@ -545,31 +809,69 @@
 
         socket.on('chat-audio', (msg) => {
             if (msg.from === myPin) return;
+            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Audio was deleted', 'other', msg.id, msg.timestamp);
                 return;
             }
             const data = {
                 id: msg.id, audioData: msg.audioData, fileName: msg.fileName, fileSize: msg.fileSize,
-                duration: msg.duration || 0, from: msg.from, timestamp: msg.timestamp, type: 'audio', deleted: false
+                duration: msg.duration || 0, from: msg.from, timestamp: msg.timestamp, type: 'audio', deleted: false,
+                deliveredTo: msg.deliveredTo || [], seenBy: msg.seenBy || [], replyTo: msg.replyTo || null
             };
             allMessages.push(data);
-            if (msg.chatId === currentChatId) appendAudioMessage(msg.audioData, msg.fileName, msg.fileSize, msg.duration, 'other', msg.id, msg.timestamp);
+            if (msg.chatId === currentChatId) appendAudioMessage(msg.audioData, msg.fileName, msg.fileSize, msg.duration, 'other', msg.id, msg.timestamp, msg.replyTo);
             updateChatPreview(msg.chatId, '🎵 Audio', msg.timestamp);
             playNotificationSound();
         });
 
         socket.on('voice-message', (msg) => {
             if (msg.from === myPin) return;
+            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Voice was deleted', 'other', msg.id, msg.timestamp);
                 return;
             }
-            const data = { id: msg.id, audioData: msg.audioData, duration: msg.duration || 0, from: msg.from, timestamp: msg.timestamp, type: 'voice', deleted: false };
+            const data = { id: msg.id, audioData: msg.audioData, duration: msg.duration || 0, from: msg.from, timestamp: msg.timestamp, type: 'voice', deleted: false, deliveredTo: msg.deliveredTo || [], seenBy: msg.seenBy || [], replyTo: msg.replyTo || null };
             allMessages.push(data);
-            if (msg.chatId === currentChatId) appendVoiceMessage(msg.audioData, msg.duration, 'other', msg.id, msg.timestamp);
+            if (msg.chatId === currentChatId) appendVoiceMessage(msg.audioData, msg.duration, 'other', msg.id, msg.timestamp, msg.replyTo);
             updateChatPreview(msg.chatId, '🎤 Voice', msg.timestamp);
             playNotificationSound();
+        });
+
+        // ===== NEW: Read receipt events =====
+        socket.on('message-delivered', ({ chatId, messageId, byPin }) => {
+            const msg = allMessages.find(m => m.id === messageId);
+            if (msg) {
+                msg.deliveredTo = msg.deliveredTo || [];
+                if (!msg.deliveredTo.includes(byPin)) msg.deliveredTo.push(byPin);
+                updateTick(messageId, msg);
+            }
+        });
+
+        socket.on('messages-seen', ({ chatId, messageIds, seenBy }) => {
+            messageIds.forEach(id => {
+                const msg = allMessages.find(m => m.id === id);
+                if (msg) {
+                    msg.seenBy = msg.seenBy || [];
+                    if (!msg.seenBy.includes(seenBy)) msg.seenBy.push(seenBy);
+                    updateTick(id, msg);
+                }
+            });
+        });
+
+        // ===== NEW: Delete message event =====
+        socket.on('message-deleted', ({ chatId, messageId }) => {
+            const wrapper = document.querySelector(`[data-message-id="${messageId}"]`);
+            if (wrapper) {
+                wrapper.style.transition = 'opacity 0.3s, transform 0.3s';
+                wrapper.style.opacity = '0';
+                wrapper.style.transform = 'scale(0.9)';
+                setTimeout(() => {
+                    wrapper.remove();
+                    allMessages = allMessages.filter(m => m.id !== messageId);
+                }, 300);
+            }
         });
 
         socket.on('partner-left-chat', ({ chatId }) => {
@@ -631,16 +933,6 @@
         socket.on('request-sent', ({ toPin }) => {
             setError(`✅ Request sent to ${toPin}!`);
         });
-    }
-
-    // ===== Load Chats =====
-    // Now mostly a cache; server sends authoritative list on register
-    function loadChats() {
-        const saved = localStorage.getItem('quickie_chats_' + myPin);
-        if (saved) {
-            try { allChats = JSON.parse(saved); } catch (e) { allChats = []; }
-        }
-        renderChatList();
     }
 
     function saveChatsToLocal() {
@@ -837,6 +1129,8 @@
         messageList.innerHTML = '';
         allMessages = [];
         isFirstHistoryLoad = true;
+        // Clear reply preview
+        clearReplyPreview();
         socket.emit('get-chat-history', { chatId });
         socket.emit('get-partner-status', { pin });
         renderChatList();
@@ -886,68 +1180,60 @@
         if (myPin) copyToClipboard(myPin, '✅ Your PIN copied!');
     });
 
-    // ===== Logout (FULL UI RESET) =====
+    // ===== Logout Function (reusable) =====
+    function doLogout() {
+        myPin = null;
+        myPhone = null;
+        myName = '';
+        allChats = [];
+        allMessages = [];
+        pendingRequests = [];
+        currentChatId = null;
+        currentPartnerPin = null;
+        currentPartnerName = '';
+        partnerStatuses.clear();
+        loginAttempted = false;
+
+        chatMenu.classList.remove('active');
+        loginScreen.style.display = 'flex';
+
+        partnerName.textContent = 'Select a chat';
+        partnerPin.textContent = '';
+        statusDot.className = 'status-dot offline';
+        statusText.textContent = 'Offline';
+
+        messageList.innerHTML = '';
+        chatInput.value = '';
+        chatInput.style.height = 'auto';
+        chatListContainer.innerHTML = '';
+        pendingList.innerHTML = '';
+
+        loginPinInput.value = '';
+        loginPinInput.focus();
+        pinDisplay.textContent = '- - - - - - - -';
+        pinDisplayArea.classList.add('hidden');
+        copyPinBtn.classList.add('hidden');
+        loginAfterGenerateBtn.classList.add('hidden');
+
+        // Reset signup fields
+        phoneInput.value = '';
+        passwordInput.value = '';
+        updatePasswordStrength();
+
+        if (addFriendSection) addFriendSection.classList.remove('expanded');
+        if (emojiPicker) emojiPicker.classList.remove('show');
+        if (searchBar) searchBar.classList.remove('show');
+        if (searchResults) searchResults.classList.remove('show');
+        if (searchInput) searchInput.value = '';
+
+        clearReplyPreview();
+
+        if (socket) socket.disconnect();
+    }
+
     logoutBtn.addEventListener('click', function () {
         if (confirm('Logout?')) {
-            const savedPin = myPin;
-            myPin = null;
-            myPhone = null;
-            myName = '';
-            allChats = [];
-            allMessages = [];
-            pendingRequests = [];
-            currentChatId = null;
-            currentPartnerPin = null;
-            currentPartnerName = '';
-            partnerStatuses.clear();
-            loginAttempted = false;
-
-            // === FULL UI RESET ===
-            chatMenu.classList.remove('active');
-            loginScreen.style.display = 'flex';
-
-            // Reset main chat header
-            partnerName.textContent = 'Select a chat';
-            partnerPin.textContent = '';
-            statusDot.className = 'status-dot offline';
-            statusText.textContent = 'Offline';
-
-            // Reset message list
-            messageList.innerHTML = '';
-
-            // Reset input
-            chatInput.value = '';
-            chatInput.style.height = 'auto';
-
-            // Reset sidebar lists
-            chatListContainer.innerHTML = '';
-            pendingList.innerHTML = '';
-
-            // Reset login form
-            loginPinInput.value = '';
-            loginPinInput.focus();
-            pinDisplay.textContent = '- - - - - - - -';
-            pinDisplayArea.classList.add('hidden');
-            copyPinBtn.classList.add('hidden');
-            loginAfterGenerateBtn.classList.add('hidden');
-
-            // Reset add friend section
-            if (addFriendSection) addFriendSection.classList.remove('expanded');
-
-            // Close emoji picker if open
-            if (emojiPicker) emojiPicker.classList.remove('show');
-
-            // Close search if open
-            if (searchBar) searchBar.classList.remove('show');
-            if (searchResults) searchResults.classList.remove('show');
-            if (searchInput) searchInput.value = '';
-
-            // Disconnect socket
-            if (socket) socket.disconnect();
-
-            // Clear cached chats
-            if (savedPin) localStorage.removeItem('quickie_chats_' + savedPin);
-
+            doLogout();
             console.log('👋 Logged out');
         }
     });
@@ -977,6 +1263,111 @@
     sidebarCloseBtn.addEventListener('click', closeSidebar);
     sidebarOverlay.addEventListener('click', closeSidebar);
 
+    // ===== Reply Preview =====
+    function showReplyPreview(message) {
+        replyingTo = {
+            id: message.id,
+            text: message.text || '',
+            from: message.from,
+            type: message.type,
+            image: message.image ? message.image.slice(0, 100) + '...' : null, // small preview
+            fileName: message.fileName || null
+        };
+
+        let previewText = '';
+        if (message.type === 'text') previewText = message.text || '';
+        else if (message.type === 'image') previewText = '📸 Image';
+        else if (message.type === 'video') previewText = '🎬 Video';
+        else if (message.type === 'audio') previewText = '🎵 Audio';
+        else if (message.type === 'voice') previewText = '🎤 Voice';
+        else if (message.type === 'file') previewText = '📎 ' + (message.fileName || 'File');
+
+        replyPreviewName.textContent = message.from === myPin ? 'You' : (currentPartnerName || 'Partner');
+        replyPreviewText.textContent = previewText;
+        replyPreviewBar.classList.add('show');
+        chatInput.focus();
+    }
+
+    function clearReplyPreview() {
+        replyingTo = null;
+        replyPreviewBar.classList.remove('show');
+    }
+
+    replyPreviewClose.addEventListener('click', clearReplyPreview);
+
+    // ===== Message Context Menu =====
+    function showContextMenu(e, message, isOwn) {
+        e.preventDefault();
+        contextMenuMessageId = message.id;
+        contextMenuMessage = message;
+
+        const menu = messageContextMenu;
+        menu.classList.add('show');
+
+        // Position near click, but keep in viewport
+        const menuW = 200;
+        const menuH = 100;
+        let x = e.clientX || e.touches?.[0]?.clientX || 0;
+        let y = e.clientY || e.touches?.[0]?.clientY || 0;
+        x = Math.min(x, window.innerWidth - menuW - 8);
+        y = Math.min(y, window.innerHeight - menuH - 8);
+        x = Math.max(8, x);
+        y = Math.max(8, y);
+        menu.style.left = x + 'px';
+        menu.style.top = y + 'px';
+
+        // Show/hide delete based on ownership
+        ctxDeleteBtn.style.display = isOwn ? 'flex' : 'none';
+
+        refreshIcons();
+    }
+
+    function hideContextMenu() {
+        messageContextMenu.classList.remove('show');
+        contextMenuMessageId = null;
+        contextMenuMessage = null;
+    }
+
+    ctxReplyBtn.addEventListener('click', function () {
+        if (contextMenuMessage) showReplyPreview(contextMenuMessage);
+        hideContextMenu();
+    });
+
+    ctxDeleteBtn.addEventListener('click', function () {
+        if (!contextMenuMessageId || !currentChatId) return;
+        const confirmed = confirm('Delete this message for everyone? This cannot be undone.');
+        if (confirmed) {
+            socket.emit('delete-message', {
+                chatId: currentChatId,
+                messageId: contextMenuMessageId,
+                fromPin: myPin
+            });
+            // Optimistically remove
+            const wrapper = document.querySelector(`[data-message-id="${contextMenuMessageId}"]`);
+            if (wrapper) {
+                wrapper.style.transition = 'opacity 0.3s, transform 0.3s';
+                wrapper.style.opacity = '0';
+                wrapper.style.transform = 'scale(0.9)';
+                setTimeout(() => {
+                    wrapper.remove();
+                    allMessages = allMessages.filter(m => m.id !== contextMenuMessageId);
+                }, 300);
+            }
+        }
+        hideContextMenu();
+    });
+
+    ctxCancelBtn.addEventListener('click', hideContextMenu);
+
+    // Hide menu on outside click
+    document.addEventListener('click', function (e) {
+        if (!messageContextMenu.contains(e.target)) hideContextMenu();
+    });
+
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') hideContextMenu();
+    });
+
     // ===== Send Message =====
     function sendMessage() {
         const text = chatInput.value.trim();
@@ -991,10 +1382,28 @@
             return;
         }
 
-        const messageId = ++messageIdCounter;
-        const messageData = { id: messageId, text, from: myPin, timestamp: Date.now(), type: 'text', deleted: false };
+        const messageId = ++messageIdCounter + '_' + Date.now();
+        const replyToPayload = replyingTo ? {
+            id: replyingTo.id,
+            text: replyingTo.text,
+            from: replyingTo.from,
+            type: replyingTo.type,
+            fileName: replyingTo.fileName
+        } : null;
+
+        const messageData = {
+            id: messageId,
+            text,
+            from: myPin,
+            timestamp: Date.now(),
+            type: 'text',
+            deleted: false,
+            deliveredTo: [myPin],
+            seenBy: [myPin],
+            replyTo: replyToPayload
+        };
         allMessages.push(messageData);
-        appendMessage(text, 'me', messageId);
+        appendMessage(text, 'me', messageId, Date.now(), replyToPayload);
 
         const chat = allChats.find(c => c.chatId === currentChatId);
         if (chat) {
@@ -1004,10 +1413,17 @@
             saveChatsToLocal();
         }
 
-        socket.emit('chat-message', { chatId: currentChatId, text, messageId, fromPin: myPin });
+        socket.emit('chat-message', {
+            chatId: currentChatId,
+            text,
+            messageId,
+            fromPin: myPin,
+            replyTo: replyToPayload
+        });
         chatInput.value = '';
         chatInput.style.height = 'auto';
         chatInput.focus();
+        clearReplyPreview();
     }
 
     sendBtn.addEventListener('click', sendMessage);
@@ -1123,15 +1539,63 @@
             return;
         }
         const type = msg.from === myPin ? 'me' : 'other';
-        if (msg.type === 'image') appendImage(msg.image, type, msg.id, msg.timestamp, msg.fileName);
-        else if (msg.type === 'voice') appendVoiceMessage(msg.audioData, msg.duration, type, msg.id, msg.timestamp);
-        else if (msg.type === 'file') appendFileMessage(msg.fileData, msg.fileName, msg.fileSize, msg.fileType, type, msg.id, msg.timestamp);
-        else if (msg.type === 'video') appendVideoMessage(msg.videoData, msg.fileName, msg.fileSize, msg.thumbnail, type, msg.id, msg.timestamp);
-        else if (msg.type === 'audio') appendAudioMessage(msg.audioData, msg.fileName, msg.fileSize, msg.duration, type, msg.id, msg.timestamp);
-        else appendMessage(msg.text, type, msg.id, msg.timestamp);
+        if (msg.type === 'image') appendImage(msg.image, type, msg.id, msg.timestamp, msg.fileName, msg.replyTo);
+        else if (msg.type === 'voice') appendVoiceMessage(msg.audioData, msg.duration, type, msg.id, msg.timestamp, msg.replyTo);
+        else if (msg.type === 'file') appendFileMessage(msg.fileData, msg.fileName, msg.fileSize, msg.fileType, type, msg.id, msg.timestamp, msg.replyTo);
+        else if (msg.type === 'video') appendVideoMessage(msg.videoData, msg.fileName, msg.fileSize, msg.thumbnail, type, msg.id, msg.timestamp, msg.replyTo);
+        else if (msg.type === 'audio') appendAudioMessage(msg.audioData, msg.fileName, msg.fileSize, msg.duration, type, msg.id, msg.timestamp, msg.replyTo);
+        else appendMessage(msg.text, type, msg.id, msg.timestamp, msg.replyTo, msg);
     }
 
-    function appendMessage(text, type, messageId = null, timestamp = null) {
+    // ===== Tick renderer (for read receipts) =====
+    function renderTickHTML(msg) {
+        if (!msg) return '';
+        const seenByOthers = (msg.seenBy || []).filter(p => p !== msg.from);
+        const deliveredToOthers = (msg.deliveredTo || []).filter(p => p !== msg.from);
+        if (seenByOthers.length > 0) {
+            return '<span class="tick tick-seen" title="Seen"><i data-lucide="check-check"></i></span>';
+        }
+        if (deliveredToOthers.length > 0) {
+            return '<span class="tick tick-delivered" title="Delivered"><i data-lucide="check-check"></i></span>';
+        }
+        return '<span class="tick tick-sent" title="Sent"><i data-lucide="check"></i></span>';
+    }
+
+    function updateTick(messageId, msg) {
+        const wrapper = document.querySelector(`[data-message-id="${messageId}"]`);
+        if (!wrapper) return;
+        const tickContainer = wrapper.querySelector('.tick-container');
+        if (!tickContainer) return;
+        tickContainer.innerHTML = renderTickHTML(msg);
+        refreshIcons();
+    }
+
+    // ===== Reply block renderer =====
+    function renderReplyHTML(replyTo) {
+        if (!replyTo) return '';
+        let text = replyTo.text || '';
+        if (replyTo.type === 'image') text = '📸 Image';
+        else if (replyTo.type === 'video') text = '🎬 Video';
+        else if (replyTo.type === 'audio') text = '🎵 Audio';
+        else if (replyTo.type === 'voice') text = '🎤 Voice';
+        else if (replyTo.type === 'file') text = '📎 ' + (replyTo.fileName || 'File');
+
+        const who = replyTo.from === myPin ? 'You' : (currentPartnerName || 'Partner');
+        return `
+            <div class="reply-quote" data-reply-to="${replyTo.id}">
+                <div class="reply-quote-name">${who}</div>
+                <div class="reply-quote-text">${escapeHtml(text)}</div>
+            </div>
+        `;
+    }
+
+    function escapeHtml(str) {
+        const div = document.createElement('div');
+        div.textContent = str || '';
+        return div.innerHTML;
+    }
+
+    function appendMessage(text, type, messageId = null, timestamp = null, replyTo = null, msgObj = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
@@ -1139,26 +1603,93 @@
         const div = document.createElement('div');
         div.className = 'message ' + type;
         if (text === 'This message was deleted') div.classList.add('deleted');
+
+        if (replyTo) {
+            const replyEl = document.createElement('div');
+            replyEl.innerHTML = renderReplyHTML(replyTo);
+            div.appendChild(replyEl.firstElementChild);
+        }
+
         const content = document.createElement('div');
         content.textContent = text;
         div.appendChild(content);
+
+        // Timestamp + tick
+        const metaRow = document.createElement('div');
+        metaRow.className = 'message-meta';
+
         const time = document.createElement('span');
         time.className = 'timestamp';
         if (timestamp) time.textContent = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         else time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        div.appendChild(time);
+        metaRow.appendChild(time);
+
+        if (type === 'me' && msgObj) {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = renderTickHTML(msgObj);
+            metaRow.appendChild(tickContainer);
+        } else if (type === 'me') {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = '<span class="tick tick-sent"><i data-lucide="check"></i></span>';
+            metaRow.appendChild(tickContainer);
+        }
+
+        div.appendChild(metaRow);
         wrapper.appendChild(div);
+
+        // Attach context menu handlers
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const isOwn = type === 'me';
+            const msgData = {
+                id: messageId,
+                text: text,
+                from: type === 'me' ? myPin : currentPartnerPin,
+                type: 'text'
+            };
+            showContextMenu(e, msgData, isOwn);
+        });
+
+        // Long-press for mobile
+        let pressTimer = null;
+        div.addEventListener('touchstart', function (e) {
+            pressTimer = setTimeout(() => {
+                const isOwn = type === 'me';
+                const msgData = {
+                    id: messageId,
+                    text: text,
+                    from: type === 'me' ? myPin : currentPartnerPin,
+                    type: 'text'
+                };
+                const touch = e.touches[0];
+                showContextMenu({ preventDefault: () => { }, clientX: touch.clientX, clientY: touch.clientY }, msgData, isOwn);
+            }, 600);
+        });
+        div.addEventListener('touchend', () => clearTimeout(pressTimer));
+        div.addEventListener('touchmove', () => clearTimeout(pressTimer));
+
         messageList.appendChild(wrapper);
+        refreshIcons();
         scrollToBottom();
     }
 
-    function appendImage(imageData, type, messageId = null, timestamp = null, fileName = null) {
+    function appendImage(imageData, type, messageId = null, timestamp = null, fileName = null, replyTo = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
         if (messageId) wrapper.dataset.messageId = messageId;
         const div = document.createElement('div');
         div.className = 'message ' + type;
+
+        if (replyTo) {
+            const replyEl = document.createElement('div');
+            replyEl.innerHTML = renderReplyHTML(replyTo);
+            div.appendChild(replyEl.firstElementChild);
+        }
+
         const imgWrap = document.createElement('div');
         imgWrap.className = 'image-message-wrap';
 
@@ -1184,18 +1715,41 @@
         imgWrap.appendChild(dlBtn);
         div.appendChild(imgWrap);
 
+        const metaRow = document.createElement('div');
+        metaRow.className = 'message-meta';
         const time = document.createElement('span');
         time.className = 'timestamp';
         if (timestamp) time.textContent = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         else time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        div.appendChild(time);
+        metaRow.appendChild(time);
+        if (type === 'me') {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = '<span class="tick tick-sent"><i data-lucide="check"></i></span>';
+            metaRow.appendChild(tickContainer);
+        }
+        div.appendChild(metaRow);
+
+        // Context menu
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const msgData = {
+                id: messageId,
+                text: 'Image',
+                from: type === 'me' ? myPin : currentPartnerPin,
+                type: 'image'
+            };
+            showContextMenu(e, msgData, type === 'me');
+        });
+
         wrapper.appendChild(div);
         messageList.appendChild(wrapper);
         refreshIcons();
         scrollToBottom();
     }
 
-    function appendFileMessage(fileData, fileName, fileSize, fileType, type, messageId = null, timestamp = null) {
+    function appendFileMessage(fileData, fileName, fileSize, fileType, type, messageId = null, timestamp = null, replyTo = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
@@ -1204,9 +1758,14 @@
         const div = document.createElement('div');
         div.className = 'message ' + type;
 
+        if (replyTo) {
+            const replyEl = document.createElement('div');
+            replyEl.innerHTML = renderReplyHTML(replyTo);
+            div.appendChild(replyEl.firstElementChild);
+        }
+
         const fileBox = document.createElement('div');
         fileBox.className = 'file-message';
-
         fileBox.appendChild(createFileIconEl(fileName, fileType));
 
         const meta = document.createElement('div');
@@ -1230,12 +1789,34 @@
         fileBox.appendChild(dl);
         div.appendChild(fileBox);
 
+        const metaRow = document.createElement('div');
+        metaRow.className = 'message-meta';
         const time = document.createElement('span');
         time.className = 'timestamp';
         time.textContent = timestamp
             ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        div.appendChild(time);
+        metaRow.appendChild(time);
+        if (type === 'me') {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = '<span class="tick tick-sent"><i data-lucide="check"></i></span>';
+            metaRow.appendChild(tickContainer);
+        }
+        div.appendChild(metaRow);
+
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const msgData = {
+                id: messageId,
+                text: fileName || 'File',
+                from: type === 'me' ? myPin : currentPartnerPin,
+                type: 'file',
+                fileName: fileName
+            };
+            showContextMenu(e, msgData, type === 'me');
+        });
 
         wrapper.appendChild(div);
         messageList.appendChild(wrapper);
@@ -1243,7 +1824,7 @@
         scrollToBottom();
     }
 
-    function appendVideoMessage(videoData, fileName, fileSize, thumbnail, type, messageId = null, timestamp = null) {
+    function appendVideoMessage(videoData, fileName, fileSize, thumbnail, type, messageId = null, timestamp = null, replyTo = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
@@ -1251,6 +1832,12 @@
 
         const div = document.createElement('div');
         div.className = 'message ' + type;
+
+        if (replyTo) {
+            const replyEl = document.createElement('div');
+            replyEl.innerHTML = renderReplyHTML(replyTo);
+            div.appendChild(replyEl.firstElementChild);
+        }
 
         const videoBox = document.createElement('div');
         videoBox.className = 'video-message';
@@ -1294,12 +1881,33 @@
 
         div.appendChild(videoBox);
 
+        const metaRow = document.createElement('div');
+        metaRow.className = 'message-meta';
         const time = document.createElement('span');
         time.className = 'timestamp';
         time.textContent = timestamp
             ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        div.appendChild(time);
+        metaRow.appendChild(time);
+        if (type === 'me') {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = '<span class="tick tick-sent"><i data-lucide="check"></i></span>';
+            metaRow.appendChild(tickContainer);
+        }
+        div.appendChild(metaRow);
+
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const msgData = {
+                id: messageId,
+                text: 'Video',
+                from: type === 'me' ? myPin : currentPartnerPin,
+                type: 'video'
+            };
+            showContextMenu(e, msgData, type === 'me');
+        });
 
         wrapper.appendChild(div);
         messageList.appendChild(wrapper);
@@ -1307,7 +1915,7 @@
         scrollToBottom();
     }
 
-    function appendAudioMessage(audioData, fileName, fileSize, duration, type, messageId = null, timestamp = null) {
+    function appendAudioMessage(audioData, fileName, fileSize, duration, type, messageId = null, timestamp = null, replyTo = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
@@ -1315,6 +1923,12 @@
 
         const div = document.createElement('div');
         div.className = 'message ' + type;
+
+        if (replyTo) {
+            const replyEl = document.createElement('div');
+            replyEl.innerHTML = renderReplyHTML(replyTo);
+            div.appendChild(replyEl.firstElementChild);
+        }
 
         const audioBox = document.createElement('div');
         audioBox.className = 'audio-message';
@@ -1371,7 +1985,6 @@
 
         const meta = document.createElement('div');
         meta.className = 'audio-meta';
-
         const nameWrap = document.createElement('div');
         nameWrap.style.flex = '1';
         nameWrap.style.minWidth = '0';
@@ -1397,12 +2010,33 @@
         audioBox.appendChild(meta);
         div.appendChild(audioBox);
 
+        const metaRow = document.createElement('div');
+        metaRow.className = 'message-meta';
         const time = document.createElement('span');
         time.className = 'timestamp';
         time.textContent = timestamp
             ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        div.appendChild(time);
+        metaRow.appendChild(time);
+        if (type === 'me') {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = '<span class="tick tick-sent"><i data-lucide="check"></i></span>';
+            metaRow.appendChild(tickContainer);
+        }
+        div.appendChild(metaRow);
+
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const msgData = {
+                id: messageId,
+                text: 'Audio',
+                from: type === 'me' ? myPin : currentPartnerPin,
+                type: 'audio'
+            };
+            showContextMenu(e, msgData, type === 'me');
+        });
 
         wrapper.appendChild(div);
         messageList.appendChild(wrapper);
@@ -1410,13 +2044,19 @@
         scrollToBottom();
     }
 
-    function appendVoiceMessage(audioData, duration, type, messageId = null, timestamp = null) {
+    function appendVoiceMessage(audioData, duration, type, messageId = null, timestamp = null, replyTo = null) {
         if (!messageList) return;
         const wrapper = document.createElement('div');
         wrapper.className = 'message-wrapper';
         if (messageId) wrapper.dataset.messageId = messageId;
         const div = document.createElement('div');
         div.className = 'message ' + type;
+
+        if (replyTo) {
+            const replyEl = document.createElement('div');
+            replyEl.innerHTML = renderReplyHTML(replyTo);
+            div.appendChild(replyEl.firstElementChild);
+        }
 
         const audioContainer = document.createElement('div');
         audioContainer.style.display = 'flex';
@@ -1444,10 +2084,6 @@
             fallback.style.fontSize = '0.85rem';
             audioContainer.appendChild(fallback);
             div.appendChild(audioContainer);
-            const time = document.createElement('span');
-            time.className = 'timestamp';
-            time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-            div.appendChild(time);
             wrapper.appendChild(div);
             messageList.appendChild(wrapper);
             refreshIcons();
@@ -1527,12 +2163,33 @@
         dlRow.appendChild(dlBtn);
         div.appendChild(dlRow);
 
+        const metaRow = document.createElement('div');
+        metaRow.className = 'message-meta';
         const time = document.createElement('span');
         time.className = 'timestamp';
         time.textContent = timestamp
             ? new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        div.appendChild(time);
+        metaRow.appendChild(time);
+        if (type === 'me') {
+            const tickContainer = document.createElement('span');
+            tickContainer.className = 'tick-container';
+            tickContainer.innerHTML = '<span class="tick tick-sent"><i data-lucide="check"></i></span>';
+            metaRow.appendChild(tickContainer);
+        }
+        div.appendChild(metaRow);
+
+        div.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const msgData = {
+                id: messageId,
+                text: 'Voice',
+                from: type === 'me' ? myPin : currentPartnerPin,
+                type: 'voice'
+            };
+            showContextMenu(e, msgData, type === 'me');
+        });
 
         wrapper.appendChild(div);
         messageList.appendChild(wrapper);
@@ -1655,18 +2312,20 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`Image too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_img';
+        const messageId = Date.now() + '_img_' + Math.random().toString(36).slice(2, 6);
         const progress = createProgressBubble(file.name, file.type);
+        const replyToPayload = replyingTo ? { id: replyingTo.id, text: replyingTo.text, from: replyingTo.from, type: replyingTo.type, fileName: replyingTo.fileName } : null;
 
         try {
             const imageData = await readFileWithProgress(file, (p, l, t) => progress.setProgress(p, l, t));
             progress.complete();
-            const data = { id: messageId, image: imageData, fileName: file.name, from: myPin, timestamp: Date.now(), type: 'image', deleted: false };
+            const data = { id: messageId, image: imageData, fileName: file.name, from: myPin, timestamp: Date.now(), type: 'image', deleted: false, replyTo: replyToPayload };
             allMessages.push(data);
-            appendImage(imageData, 'me', messageId, Date.now(), file.name);
+            appendImage(imageData, 'me', messageId, Date.now(), file.name, replyToPayload);
             const chat = allChats.find(c => c.chatId === currentChatId);
             if (chat) { chat.lastMessage = '📸 Image'; chat.lastTimestamp = Date.now(); renderChatList(); saveChatsToLocal(); }
-            socket.emit('chat-image', { chatId: currentChatId, image: imageData, fileName: file.name, messageId, fromPin: myPin });
+            socket.emit('chat-image', { chatId: currentChatId, image: imageData, fileName: file.name, messageId, fromPin: myPin, replyTo: replyToPayload });
+            clearReplyPreview();
         } catch (err) {
             console.error(err);
             progress.fail('Read failed');
@@ -1683,23 +2342,25 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`File too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_file';
+        const messageId = Date.now() + '_file_' + Math.random().toString(36).slice(2, 6);
         const progress = createProgressBubble(file.name, file.type);
+        const replyToPayload = replyingTo ? { id: replyingTo.id, text: replyingTo.text, from: replyingTo.from, type: replyingTo.type, fileName: replyingTo.fileName } : null;
 
         try {
             const fileData = await readFileWithProgress(file, (p, l, t) => progress.setProgress(p, l, t));
             progress.complete();
             const fileSize = formatBytes(file.size);
-            const data = { id: messageId, fileData, fileName: file.name, fileType: file.type, fileSize, from: myPin, timestamp: Date.now(), type: 'file', deleted: false };
+            const data = { id: messageId, fileData, fileName: file.name, fileType: file.type, fileSize, from: myPin, timestamp: Date.now(), type: 'file', deleted: false, replyTo: replyToPayload };
             allMessages.push(data);
-            appendFileMessage(fileData, file.name, fileSize, file.type, 'me', messageId);
+            appendFileMessage(fileData, file.name, fileSize, file.type, 'me', messageId, null, replyToPayload);
             const chat = allChats.find(c => c.chatId === currentChatId);
             if (chat) {
                 chat.lastMessage = `📎 ${file.name}`;
                 chat.lastTimestamp = Date.now();
                 renderChatList(); saveChatsToLocal();
             }
-            socket.emit('chat-file', { chatId: currentChatId, fileData, fileName: file.name, fileType: file.type, fileSize, messageId, fromPin: myPin });
+            socket.emit('chat-file', { chatId: currentChatId, fileData, fileName: file.name, fileType: file.type, fileSize, messageId, fromPin: myPin, replyTo: replyToPayload });
+            clearReplyPreview();
         } catch (err) {
             console.error(err);
             progress.fail('Read failed');
@@ -1716,8 +2377,9 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`Video too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_vid';
+        const messageId = Date.now() + '_vid_' + Math.random().toString(36).slice(2, 6);
         const progress = createProgressBubble(file.name, file.type);
+        const replyToPayload = replyingTo ? { id: replyingTo.id, text: replyingTo.text, from: replyingTo.from, type: replyingTo.type, fileName: replyingTo.fileName } : null;
 
         let thumbnail = null;
         try { thumbnail = await extractVideoThumbnail(file); } catch (e) { }
@@ -1726,12 +2388,13 @@
             const videoData = await readFileWithProgress(file, (p, l, t) => progress.setProgress(p, l, t));
             progress.complete();
             const fileSize = formatBytes(file.size);
-            const data = { id: messageId, videoData, fileName: file.name, fileSize, thumbnail, from: myPin, timestamp: Date.now(), type: 'video', deleted: false };
+            const data = { id: messageId, videoData, fileName: file.name, fileSize, thumbnail, from: myPin, timestamp: Date.now(), type: 'video', deleted: false, replyTo: replyToPayload };
             allMessages.push(data);
-            appendVideoMessage(videoData, file.name, fileSize, thumbnail, 'me', messageId);
+            appendVideoMessage(videoData, file.name, fileSize, thumbnail, 'me', messageId, null, replyToPayload);
             const chat = allChats.find(c => c.chatId === currentChatId);
             if (chat) { chat.lastMessage = '🎬 Video'; chat.lastTimestamp = Date.now(); renderChatList(); saveChatsToLocal(); }
-            socket.emit('chat-video', { chatId: currentChatId, videoData, fileName: file.name, fileSize, thumbnail, messageId, fromPin: myPin });
+            socket.emit('chat-video', { chatId: currentChatId, videoData, fileName: file.name, fileSize, thumbnail, messageId, fromPin: myPin, replyTo: replyToPayload });
+            clearReplyPreview();
         } catch (err) {
             console.error(err);
             progress.fail('Read failed');
@@ -1748,8 +2411,9 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`Audio too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_aud';
+        const messageId = Date.now() + '_aud_' + Math.random().toString(36).slice(2, 6);
         const progress = createProgressBubble(file.name, file.type);
+        const replyToPayload = replyingTo ? { id: replyingTo.id, text: replyingTo.text, from: replyingTo.from, type: replyingTo.type, fileName: replyingTo.fileName } : null;
 
         try {
             const audioData = await readFileWithProgress(file, (p, l, t) => progress.setProgress(p, l, t));
@@ -1757,12 +2421,13 @@
             const fileSize = formatBytes(file.size);
             let duration = 0;
             try { duration = await getAudioDuration(audioData); } catch (e) { }
-            const data = { id: messageId, audioData, fileName: file.name, fileSize, duration, from: myPin, timestamp: Date.now(), type: 'audio', deleted: false };
+            const data = { id: messageId, audioData, fileName: file.name, fileSize, duration, from: myPin, timestamp: Date.now(), type: 'audio', deleted: false, replyTo: replyToPayload };
             allMessages.push(data);
-            appendAudioMessage(audioData, file.name, fileSize, duration, 'me', messageId);
+            appendAudioMessage(audioData, file.name, fileSize, duration, 'me', messageId, null, replyToPayload);
             const chat = allChats.find(c => c.chatId === currentChatId);
             if (chat) { chat.lastMessage = '🎵 Audio'; chat.lastTimestamp = Date.now(); renderChatList(); saveChatsToLocal(); }
-            socket.emit('chat-audio', { chatId: currentChatId, audioData, fileName: file.name, fileSize, duration, messageId, fromPin: myPin });
+            socket.emit('chat-audio', { chatId: currentChatId, audioData, fileName: file.name, fileSize, duration, messageId, fromPin: myPin, replyTo: replyToPayload });
+            clearReplyPreview();
         } catch (err) {
             console.error(err);
             progress.fail('Read failed');
@@ -1815,16 +2480,18 @@
                     const reader = new FileReader();
                     reader.onload = function () {
                         const audioData = reader.result;
-                        const messageId = Date.now() + '_voice';
-                        const data = { id: messageId, audioData, duration: recordingSeconds, from: myPin, timestamp: Date.now(), type: 'voice', deleted: false };
+                        const messageId = Date.now() + '_voice_' + Math.random().toString(36).slice(2, 6);
+                        const replyToPayload = replyingTo ? { id: replyingTo.id, text: replyingTo.text, from: replyingTo.from, type: replyingTo.type, fileName: replyingTo.fileName } : null;
+                        const data = { id: messageId, audioData, duration: recordingSeconds, from: myPin, timestamp: Date.now(), type: 'voice', deleted: false, replyTo: replyToPayload };
                         allMessages.push(data);
-                        appendVoiceMessage(audioData, recordingSeconds, 'me', messageId);
+                        appendVoiceMessage(audioData, recordingSeconds, 'me', messageId, null, replyToPayload);
                         const chat = allChats.find(c => c.chatId === currentChatId);
                         if (chat) { chat.lastMessage = '🎤 Voice'; chat.lastTimestamp = Date.now(); renderChatList(); saveChatsToLocal(); }
-                        socket.emit('voice-message', { chatId: currentChatId, audioData, duration: recordingSeconds, messageId, fromPin: myPin });
+                        socket.emit('voice-message', { chatId: currentChatId, audioData, duration: recordingSeconds, messageId, fromPin: myPin, replyTo: replyToPayload });
                         const voiceModal = document.getElementById('voiceModal');
                         voiceModal.classList.remove('show');
                         voiceBtn.classList.remove('recording');
+                        clearReplyPreview();
                     };
                     reader.readAsDataURL(audioBlob);
                     stream.getTracks().forEach(t => t.stop());
@@ -1984,18 +2651,35 @@
             searchResults.classList.remove('show');
             searchInput.value = '';
             emojiPicker.classList.remove('show');
+            hideContextMenu();
         }
     });
 
     phoneInput.addEventListener('input', function () {
-        const cleaned = this.value.replace(/\D/g, '');
-        if (cleaned.length > 0) {
-            let formatted = '+' + cleaned;
-            if (cleaned.length > 3) formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3);
-            if (cleaned.length > 6) formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3, 6) + ' ' + cleaned.slice(6);
-            if (cleaned.length > 10) formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3, 6) + ' ' + cleaned.slice(6, 10);
-            this.value = formatted;
+        let cleaned = this.value.replace(/\D/g, '');
+        if (cleaned.length === 0) { this.value = ''; return; }
+
+        // Nigeria auto-convert: "0..." → "234..." (11-digit local format)
+        if (cleaned.startsWith('0') && cleaned.length <= 11) {
+            cleaned = '234' + cleaned.slice(1);
         }
+
+        if (cleaned.length > 15) cleaned = cleaned.slice(0, 15);
+
+        let formatted = '+' + cleaned;
+        if (cleaned.length <= 3) {
+            formatted = '+' + cleaned;
+        } else if (cleaned.length <= 6) {
+            formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3);
+        } else if (cleaned.length <= 9) {
+            formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3, 6) + ' ' + cleaned.slice(6);
+        } else if (cleaned.length <= 13) {
+            formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3, 6) + ' ' + cleaned.slice(6, 9) + ' ' + cleaned.slice(9);
+        } else {
+            formatted = '+' + cleaned.slice(0, 3) + ' ' + cleaned.slice(3, 6) + ' ' + cleaned.slice(6, 9) + ' ' + cleaned.slice(9, 13) + ' ' + cleaned.slice(13);
+        }
+
+        this.value = formatted;
     });
 
     function scrollToBottom() {
@@ -2071,7 +2755,5 @@
                 .catch((err) => console.warn('⚠️ Service Worker registration failed:', err));
         });
     }
-
-
 
 })();

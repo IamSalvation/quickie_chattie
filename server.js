@@ -2,6 +2,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
@@ -9,14 +11,15 @@ const io = new Server(server, {
     maxHttpBufferSize: 1.5e7 // 15 MB (10 MB file + base64 overhead + headroom)
 });
 
+app.set('trust proxy', 1); // For correct req.ip behind Render's proxy
+app.use(express.json({ limit: '2mb' })); // For JSON body parsing on new endpoints
+
 // ===== STATIC FILES (with PWA headers) =====
 app.use(express.static('public', {
     setHeaders: (res, filePath) => {
-        // Manifest: correct MIME type so browsers recognize it as a PWA manifest
         if (filePath.endsWith('manifest.json') || filePath.endsWith('.webmanifest')) {
             res.setHeader('Content-Type', 'application/manifest+json');
         }
-        // Service worker: never cache, allow scope from root
         if (filePath.endsWith('sw.js')) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
             res.setHeader('Service-Worker-Allowed', '/');
@@ -28,6 +31,8 @@ app.use(express.static('public', {
 const MAX_FILE_BYTES = 10 * 1024 * 1024;      // 10 MB
 const MAX_VOICE_SECONDS = 120;                 // 2 minutes
 const MESSAGE_HISTORY_LIMIT = 200;             // last 200 messages per chat
+const DEVICE_TOKEN_BYTES = 32;                 // 32 bytes = 64 hex chars
+const MAX_TRUSTED_DEVICES = 5;                 // Per user
 
 // ===== MONGODB CONNECTION =====
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/quickie';
@@ -46,6 +51,12 @@ const userSchema = new mongoose.Schema({
     pin: { type: String, required: true, unique: true, index: true },
     phone: { type: String, required: true, unique: true, index: true },
     name: { type: String, default: '' },
+    passwordHash: { type: String, default: '' },
+    trustedDevices: [{
+        tokenHash: String,
+        createdAt: { type: Date, default: Date.now },
+        lastUsedAt: { type: Date, default: Date.now }
+    }],
     socketId: { type: String, default: null },
     status: { type: String, default: 'offline' },
     lastSeen: { type: Date, default: Date.now },
@@ -67,7 +78,7 @@ const chatSchema = new mongoose.Schema({
 
 const Chat = mongoose.model('Chat', chatSchema);
 
-// Message
+// Message (with read receipts + reply support)
 const messageSchema = new mongoose.Schema({
     chatId: { type: String, required: true, index: true },
     id: { type: String, required: true },
@@ -84,7 +95,19 @@ const messageSchema = new mongoose.Schema({
     thumbnail: String,
     duration: Number,
     deleted: { type: Boolean, default: false },
-    timestamp: { type: Date, default: Date.now }
+    timestamp: { type: Date, default: Date.now },
+    // NEW: Read receipts
+    deliveredTo: { type: [String], default: [] },   // pins of users who received it
+    seenBy: { type: [String], default: [] },         // pins of users who saw it
+    // NEW: Reply support
+    replyTo: {
+        id: String,
+        text: String,
+        from: String,
+        type: String,
+        image: String,
+        fileName: String
+    }
 }, { timestamps: true });
 
 const Message = mongoose.model('Message', messageSchema);
@@ -100,6 +123,7 @@ const pendingSchema = new mongoose.Schema({
 const Pending = mongoose.model('Pending', pendingSchema);
 
 // ===== HELPERS =====
+
 function generatePIN() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let pin = '';
@@ -136,7 +160,6 @@ function isValidBase64Size(base64Data) {
     return approxBytes <= MAX_FILE_BYTES;
 }
 
-// Generate a short preview for a chat list entry
 function getMessagePreview(msg) {
     if (!msg || msg.deleted) return 'This message was deleted';
     switch (msg.type) {
@@ -150,42 +173,189 @@ function getMessagePreview(msg) {
     }
 }
 
+// Device token helpers
+function generateDeviceToken() {
+    return crypto.randomBytes(DEVICE_TOKEN_BYTES).toString('hex');
+}
+
+function hashDeviceToken(token) {
+    return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+// Password strength check (server-side mirror of client)
+function isStrongPassword(password) {
+    if (!password || typeof password !== 'string') return false;
+    if (password.length < 8) return false;
+    if (!/\d/.test(password)) return false; // at least one number
+    return true;
+}
+
 // ===== API ROUTES =====
-app.get('/pin', async (req, res) => {
-    const phone = req.query.phone;
-    const action = req.query.action || 'generate';
-    if (!phone) return res.status(400).json({ error: 'Phone number required' });
 
-    const cleanPhone = phone.replace(/\s/g, '').replace(/-/g, '');
-
+// 1) SIGNUP: create user with phone + password, auto-generate PIN, trust first device
+app.post('/signup', async (req, res) => {
     try {
-        const existingUser = await User.findOne({ phone: cleanPhone });
-
-        if (existingUser) {
-            if (action === 'recover') {
-                return res.json({ pin: existingUser.pin, exists: true, message: 'PIN recovered successfully' });
-            }
-            return res.json({ pin: existingUser.pin, exists: true, message: 'PIN already exists for this number' });
+        const { phone, password } = req.body || {};
+        if (!phone) return res.status(400).json({ error: 'Phone number required' });
+        if (!isStrongPassword(password)) {
+            return res.status(400).json({ error: 'Password must be 8+ characters with at least 1 number' });
         }
 
-        if (action === 'generate') {
-            const pin = await getUniquePIN();
-            await User.create({
-                pin,
-                phone: cleanPhone,
-                name: '',
-                socketId: null,
-                chats: [],
-                status: 'offline',
-                lastSeen: new Date()
+        const cleanPhone = String(phone).replace(/\s/g, '').replace(/-/g, '').replace(/\+/g, '');
+        // Normalize: ensure it starts with 234 if it looks like a Nigerian local number
+        let normalizedPhone = cleanPhone;
+        if (normalizedPhone.startsWith('0')) normalizedPhone = '234' + normalizedPhone.slice(1);
+
+        // Check if user exists
+        const existing = await User.findOne({ phone: normalizedPhone });
+        if (existing) {
+            // Return existing PIN — user should use login flow, not signup
+            return res.status(409).json({
+                error: 'An account already exists for this number',
+                pin: existing.pin,
+                exists: true
             });
-            return res.json({ pin, exists: false, message: 'New PIN generated successfully' });
         }
 
-        if (action === 'recover') return res.status(404).json({ error: 'Phone number not found' });
-        return res.status(400).json({ error: 'Invalid action' });
+        const pin = await getUniquePIN();
+        const passwordHash = await bcrypt.hash(password, 10);
+        const rawDeviceToken = generateDeviceToken();
+        const tokenHash = hashDeviceToken(rawDeviceToken);
+
+        await User.create({
+            pin,
+            phone: normalizedPhone,
+            name: '',
+            passwordHash,
+            trustedDevices: [{ tokenHash }],
+            socketId: null,
+            chats: [],
+            status: 'offline',
+            lastSeen: new Date()
+        });
+
+        console.log(`✅ New user signed up: ${pin} (${normalizedPhone})`);
+
+        return res.json({
+            pin,
+            phone: formatPhoneNumber(normalizedPhone),
+            deviceToken: rawDeviceToken,
+            message: 'Account created successfully'
+        });
     } catch (err) {
-        console.error('PIN route error:', err);
+        console.error('Signup error:', err);
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// 2) LOGIN CHECK: given PIN + deviceToken, decide if password is required
+app.post('/login-check', async (req, res) => {
+    try {
+        const { pin, deviceToken } = req.body || {};
+        if (!pin) return res.status(400).json({ error: 'PIN required' });
+
+        const user = await User.findOne({ pin });
+        if (!user) return res.status(404).json({ error: 'Invalid PIN' });
+
+        // If user has no password (legacy — but we're wiping DB, so unlikely)
+        if (!user.passwordHash) {
+            return res.json({
+                requiresPassword: true,
+                requiresSetup: true,
+                phone: formatPhoneNumber(user.phone)
+            });
+        }
+
+        // Check if device is trusted
+        if (deviceToken) {
+            const tokenHash = hashDeviceToken(deviceToken);
+            const trusted = user.trustedDevices.find(d => d.tokenHash === tokenHash);
+            if (trusted) {
+                trusted.lastUsedAt = new Date();
+                await user.save();
+                return res.json({
+                    requiresPassword: false,
+                    phone: formatPhoneNumber(user.phone)
+                });
+            }
+        }
+
+        return res.json({
+            requiresPassword: true,
+            requiresSetup: false,
+            phone: formatPhoneNumber(user.phone)
+        });
+    } catch (err) {
+        console.error('Login check error:', err);
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// 3) LOGIN VERIFY: given PIN + password (+ optional deviceToken to reuse), verify and return fresh device token
+app.post('/login-verify', async (req, res) => {
+    try {
+        const { pin, password, deviceToken } = req.body || {};
+        if (!pin) return res.status(400).json({ error: 'PIN required' });
+        if (!password) return res.status(400).json({ error: 'Password required' });
+
+        const user = await User.findOne({ pin });
+        if (!user) return res.status(404).json({ error: 'Invalid PIN' });
+        if (!user.passwordHash) return res.status(400).json({ error: 'This account has no password set' });
+
+        const ok = await bcrypt.compare(password, user.passwordHash);
+        if (!ok) return res.status(401).json({ error: 'Incorrect password' });
+
+        // Generate a new device token, add to trusted list
+        const rawDeviceToken = generateDeviceToken();
+        const tokenHash = hashDeviceToken(rawDeviceToken);
+
+        user.trustedDevices = user.trustedDevices || [];
+        user.trustedDevices.push({ tokenHash });
+
+        // Cap device list at MAX_TRUSTED_DEVICES (drop oldest)
+        if (user.trustedDevices.length > MAX_TRUSTED_DEVICES) {
+            user.trustedDevices = user.trustedDevices.slice(-MAX_TRUSTED_DEVICES);
+        }
+
+        await user.save();
+
+        console.log(`🔐 Login verified: ${pin}`);
+
+        return res.json({
+            success: true,
+            deviceToken: rawDeviceToken,
+            phone: formatPhoneNumber(user.phone)
+        });
+    } catch (err) {
+        console.error('Login verify error:', err);
+        return res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// 4) RECOVER PIN: given phone + password, return PIN
+app.post('/recover-pin', async (req, res) => {
+    try {
+        const { phone, password } = req.body || {};
+        if (!phone || !password) return res.status(400).json({ error: 'Phone and password required' });
+
+        const cleanPhone = String(phone).replace(/\s/g, '').replace(/-/g, '').replace(/\+/g, '');
+        let normalizedPhone = cleanPhone;
+        if (normalizedPhone.startsWith('0')) normalizedPhone = '234' + normalizedPhone.slice(1);
+
+        const user = await User.findOne({ phone: normalizedPhone });
+        if (!user) return res.status(404).json({ error: 'No account found for this number' });
+        if (!user.passwordHash) return res.status(400).json({ error: 'This account has no password set' });
+
+        const ok = await bcrypt.compare(password, user.passwordHash);
+        if (!ok) return res.status(401).json({ error: 'Incorrect password' });
+
+        return res.json({
+            pin: user.pin,
+            phone: formatPhoneNumber(user.phone),
+            message: 'PIN recovered successfully'
+        });
+    } catch (err) {
+        console.error('Recover PIN error:', err);
         return res.status(500).json({ error: 'Server error' });
     }
 });
@@ -208,6 +378,21 @@ io.on('connection', (socket) => {
             const user = await User.findOne({ pin });
             if (!user) return socket.emit('error', 'Invalid PIN');
 
+            // Single-device enforcement: kick existing socket for this PIN
+            if (user.socketId && user.socketId !== socket.id) {
+                const oldSocket = io.sockets.sockets.get(user.socketId);
+                if (oldSocket) {
+                    oldSocket.emit('kicked', {
+                        reason: 'Another device logged in with your PIN.',
+                        timestamp: Date.now()
+                    });
+                    setTimeout(() => {
+                        try { oldSocket.disconnect(true); } catch (e) { }
+                    }, 500);
+                    console.log(`🔴 Kicked old session for ${pin}: ${user.socketId}`);
+                }
+            }
+
             user.socketId = socket.id;
             if (name) user.name = name;
             user.status = 'online';
@@ -215,7 +400,7 @@ io.on('connection', (socket) => {
             await user.save();
 
             socket.join(`user_${pin}`);
-            console.log(`✅ User ${pin} registered - ONLINE`);
+            console.log(`✅ User ${pin} registered - ONLINE (socket: ${socket.id})`);
 
             socket.emit('registered', {
                 pin,
@@ -223,7 +408,7 @@ io.on('connection', (socket) => {
                 phone: formatPhoneNumber(user.phone)
             });
 
-            // Broadcast online status + build chat statuses
+            // Broadcast online status to chat partners + build chat statuses
             const chatStatuses = [];
             if (user.chats && user.chats.length > 0) {
                 for (const chat of user.chats) {
@@ -246,7 +431,7 @@ io.on('connection', (socket) => {
             }
             socket.emit('chat-statuses', chatStatuses);
 
-            // ===== SEND AUTHORITATIVE CHAT LIST FROM DATABASE =====
+            // Send authoritative chat list from database
             const serverChats = [];
             if (user.chats && user.chats.length > 0) {
                 for (const chat of user.chats) {
@@ -276,14 +461,13 @@ io.on('connection', (socket) => {
             }
             socket.emit('server-chats', serverChats);
 
-            // Send pending requests (always emit, even if empty)
+            // Always emit pending requests (even if empty)
             const pendingReqs = await Pending.find({ toPin: pin });
             socket.emit('pending-requests', pendingReqs.map(r => ({
                 fromPin: r.fromPin,
                 fromName: r.fromName,
                 timestamp: r.timestamp.getTime()
             })));
-
         } catch (err) {
             console.error('Register error:', err);
             socket.emit('error', 'Server error during registration');
@@ -460,10 +644,13 @@ io.on('connection', (socket) => {
 
     // ===== MESSAGE HANDLERS =====
 
-    socket.on('chat-message', async ({ chatId, text, messageId, fromPin }) => {
+    socket.on('chat-message', async ({ chatId, text, messageId, fromPin, replyTo }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
             if (!chat) return socket.emit('error', 'Chat not found');
+
+            // deliveredTo starts with the sender
+            const deliveredTo = [fromPin];
 
             const messageData = {
                 chatId,
@@ -472,20 +659,46 @@ io.on('connection', (socket) => {
                 from: fromPin,
                 timestamp: new Date(),
                 type: 'text',
-                deleted: false
+                deleted: false,
+                deliveredTo,
+                seenBy: [fromPin],
+                replyTo: replyTo || undefined
             };
             await Message.create(messageData);
 
-            const payload = { ...messageData, timestamp: messageData.timestamp.getTime() };
+            const payload = {
+                ...messageData,
+                timestamp: messageData.timestamp.getTime(),
+                deliveredTo,
+                seenBy: messageData.seenBy
+            };
             chat.participants.forEach(participant => {
                 io.to(`user_${participant}`).emit('chat-message', payload);
             });
+
+            // Mark as delivered for online recipients (excluding sender)
+            for (const participant of chat.participants) {
+                if (participant === fromPin) continue;
+                const otherUser = await User.findOne({ pin: participant });
+                if (otherUser && otherUser.socketId) {
+                    await Message.updateOne(
+                        { chatId, id: String(messageId) },
+                        { $addToSet: { deliveredTo: participant } }
+                    );
+                    // Notify sender
+                    io.to(`user_${fromPin}`).emit('message-delivered', {
+                        chatId,
+                        messageId: String(messageId),
+                        byPin: participant
+                    });
+                }
+            }
         } catch (err) {
             console.error('Chat message error:', err);
         }
     });
 
-    socket.on('chat-image', async ({ chatId, image, fileName, messageId, fromPin }) => {
+    socket.on('chat-image', async ({ chatId, image, fileName, messageId, fromPin, replyTo }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
             if (!chat) return;
@@ -499,7 +712,10 @@ io.on('connection', (socket) => {
                 from: fromPin,
                 timestamp: new Date(),
                 type: 'image',
-                deleted: false
+                deleted: false,
+                deliveredTo: [fromPin],
+                seenBy: [fromPin],
+                replyTo: replyTo || undefined
             };
             await Message.create(messageData);
 
@@ -512,7 +728,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('chat-file', async ({ chatId, fileData, fileName, fileSize, fileType, messageId, fromPin }) => {
+    socket.on('chat-file', async ({ chatId, fileData, fileName, fileSize, fileType, messageId, fromPin, replyTo }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
             if (!chat) return;
@@ -528,7 +744,10 @@ io.on('connection', (socket) => {
                 from: fromPin,
                 timestamp: new Date(),
                 type: 'file',
-                deleted: false
+                deleted: false,
+                deliveredTo: [fromPin],
+                seenBy: [fromPin],
+                replyTo: replyTo || undefined
             };
             await Message.create(messageData);
 
@@ -541,7 +760,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('chat-video', async ({ chatId, videoData, fileName, fileSize, messageId, fromPin, thumbnail }) => {
+    socket.on('chat-video', async ({ chatId, videoData, fileName, fileSize, messageId, fromPin, thumbnail, replyTo }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
             if (!chat) return;
@@ -557,7 +776,10 @@ io.on('connection', (socket) => {
                 from: fromPin,
                 timestamp: new Date(),
                 type: 'video',
-                deleted: false
+                deleted: false,
+                deliveredTo: [fromPin],
+                seenBy: [fromPin],
+                replyTo: replyTo || undefined
             };
             await Message.create(messageData);
 
@@ -570,7 +792,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('chat-audio', async ({ chatId, audioData, fileName, fileSize, messageId, fromPin, duration }) => {
+    socket.on('chat-audio', async ({ chatId, audioData, fileName, fileSize, messageId, fromPin, duration, replyTo }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
             if (!chat) return;
@@ -586,7 +808,10 @@ io.on('connection', (socket) => {
                 from: fromPin,
                 timestamp: new Date(),
                 type: 'audio',
-                deleted: false
+                deleted: false,
+                deliveredTo: [fromPin],
+                seenBy: [fromPin],
+                replyTo: replyTo || undefined
             };
             await Message.create(messageData);
 
@@ -599,7 +824,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('voice-message', async ({ chatId, audioData, duration, messageId, fromPin }) => {
+    socket.on('voice-message', async ({ chatId, audioData, duration, messageId, fromPin, replyTo }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
             if (!chat) return;
@@ -616,7 +841,10 @@ io.on('connection', (socket) => {
                 from: fromPin,
                 timestamp: new Date(),
                 type: 'voice',
-                deleted: false
+                deleted: false,
+                deliveredTo: [fromPin],
+                seenBy: [fromPin],
+                replyTo: replyTo || undefined
             };
             await Message.create(messageData);
 
@@ -629,6 +857,68 @@ io.on('connection', (socket) => {
         }
     });
 
+    // ===== NEW: Delete message for everyone (hard delete) =====
+    socket.on('delete-message', async ({ chatId, messageId, fromPin }) => {
+        try {
+            const chat = await Chat.findById(chatId).catch(() => null);
+            if (!chat) return socket.emit('error', 'Chat not found');
+
+            const msg = await Message.findOne({ chatId, id: String(messageId) });
+            if (!msg) return socket.emit('error', 'Message not found');
+            if (msg.from !== fromPin) return socket.emit('error', 'You can only delete your own messages');
+
+            await Message.deleteOne({ _id: msg._id });
+
+            // Notify both users
+            chat.participants.forEach(participant => {
+                io.to(`user_${participant}`).emit('message-deleted', {
+                    chatId,
+                    messageId: String(messageId)
+                });
+            });
+        } catch (err) {
+            console.error('Delete message error:', err);
+        }
+    });
+
+    // ===== NEW: Mark messages as seen =====
+    socket.on('mark-seen', async ({ chatId, pin }) => {
+        try {
+            const chat = await Chat.findById(chatId).catch(() => null);
+            if (!chat) return;
+            if (!chat.participants.includes(pin)) return;
+
+            // Find messages where user is NOT in seenBy
+            const messages = await Message.find({
+                chatId,
+                from: { $ne: pin },
+                seenBy: { $ne: pin }
+            }).select('id');
+
+            if (messages.length === 0) return;
+
+            const ids = messages.map(m => m.id);
+
+            await Message.updateMany(
+                { chatId, from: { $ne: pin }, seenBy: { $ne: pin } },
+                { $addToSet: { seenBy: pin } }
+            );
+
+            // Notify the sender(s) that messages were seen
+            chat.participants.forEach(participant => {
+                if (participant === pin) return;
+                io.to(`user_${participant}`).emit('messages-seen', {
+                    chatId,
+                    messageIds: ids,
+                    seenBy: pin
+                });
+            });
+        } catch (err) {
+            console.error('Mark seen error:', err);
+        }
+    });
+
+    // ===== Delete chat =====
     socket.on('delete-chat', async ({ chatId, pin }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
@@ -655,6 +945,7 @@ io.on('connection', (socket) => {
         }
     });
 
+    // ===== Chat history =====
     socket.on('get-chat-history', async ({ chatId }) => {
         try {
             const chat = await Chat.findById(chatId).catch(() => null);
@@ -681,7 +972,10 @@ io.on('connection', (socket) => {
                 from: m.from,
                 timestamp: m.timestamp.getTime(),
                 type: m.type,
-                deleted: m.deleted
+                deleted: m.deleted,
+                deliveredTo: m.deliveredTo || [],
+                seenBy: m.seenBy || [],
+                replyTo: m.replyTo || null
             }));
 
             socket.emit('chat-history', { chatId, messages: formatted });

@@ -49,6 +49,7 @@
                 <p class="subtitle">Instant private chat · No sign-up required</p>
 
                 <div class="login-section">
+                    <!-- SIGNUP CARD -->
                     <div class="glass-card pin-section">
                         <div class="input-group">
                             <label for="phoneInput">
@@ -56,12 +57,22 @@
                             </label>
                             <input type="tel" id="phoneInput" placeholder="+234 801 234 5678" />
                         </div>
+                        <div class="input-group">
+                            <label for="passwordInput">
+                                <i data-lucide="key-round"></i> Create a password
+                            </label>
+                            <input type="password" id="passwordInput"
+                                placeholder="At least 8 characters with a number" />
+                            <div id="passwordStrength" class="password-strength">
+                                <div class="password-strength-bar-track">
+                                    <div id="passwordStrengthBar" class="password-strength-bar"></div>
+                                </div>
+                                <span id="passwordStrengthText" class="password-strength-text"></span>
+                            </div>
+                        </div>
                         <div class="pin-actions">
                             <button id="generatePinBtn" class="btn btn-primary">
-                                <i data-lucide="rocket"></i> Generate My PIN
-                            </button>
-                            <button id="recoverPinBtn" class="btn btn-secondary">
-                                <i data-lucide="search"></i> Recover PIN
+                                <i data-lucide="rocket"></i> Sign Up & Get PIN
                             </button>
                         </div>
                         <div id="pinDisplayArea" class="pin-display-area hidden">
@@ -81,9 +92,10 @@
                         <hr />
                     </div>
 
+                    <!-- LOGIN CARD -->
                     <div class="glass-card login-form">
                         <label for="loginPinInput">
-                            <i data-lucide="key-round"></i> Enter your PIN
+                            <i data-lucide="key-round"></i> Already have a PIN? Login
                         </label>
                         <div class="login-row">
                             <input type="text" id="loginPinInput" class="pin-input" maxlength="8"
@@ -92,6 +104,9 @@
                                 <i data-lucide="log-in"></i> Login
                             </button>
                         </div>
+                        <button type="button" id="recoverPinBtn" class="forgot-password-link">
+                            Forgot your password or PIN?
+                        </button>
                     </div>
                 </div>
 
@@ -214,6 +229,17 @@
                 </div>
 
                 <div class="chat-input-area">
+                    <!-- REPLY PREVIEW BAR (hidden by default) -->
+                    <div id="replyPreviewBar" class="reply-preview-bar">
+                        <div class="reply-preview-content">
+                            <div id="replyPreviewName" class="reply-preview-name">Reply to</div>
+                            <div id="replyPreviewText" class="reply-preview-text"></div>
+                        </div>
+                        <button id="replyPreviewClose" class="reply-preview-close" title="Cancel reply">
+                            <i data-lucide="x"></i>
+                        </button>
+                    </div>
+
                     <div class="input-row">
                         <textarea id="chatInput" placeholder="Type a message..." rows="1" maxlength="1000"></textarea>
                         <button id="sendBtn" class="send-btn">
@@ -331,6 +357,91 @@
                     <i data-lucide="x"></i> Close
                 </button>
             </div>
+        </div>
+
+        <!-- ===== PASSWORD PROMPT MODAL (new device) ===== -->
+        <div id="passwordPromptModal" class="password-prompt-modal">
+            <div class="password-prompt-content">
+                <h3>
+                    <i data-lucide="shield-check"></i> New device detected
+                </h3>
+                <p>Enter your password to continue. This device will be trusted for future logins.</p>
+                <div id="passwordPromptPin" class="password-prompt-pin-label">--------</div>
+                <input type="password" id="passwordPromptInput" placeholder="Your password"
+                    autocomplete="current-password" />
+                <div class="password-prompt-actions">
+                    <button id="passwordPromptCancel" class="btn btn-secondary">
+                        <i data-lucide="x"></i> Cancel
+                    </button>
+                    <button id="passwordPromptSubmit" class="btn btn-primary">
+                        <i data-lucide="unlock"></i> Verify
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ===== FORGOT PASSWORD MODAL ===== -->
+        <div id="forgotPasswordModal" class="forgot-password-modal">
+            <div class="forgot-password-content">
+                <button id="forgotPasswordClose" class="forgot-password-close" title="Close">
+                    <i data-lucide="x"></i>
+                </button>
+                <h3>
+                    <i data-lucide="help-circle"></i> Recover your account
+                </h3>
+                <p>Enter your phone number and password to see your PIN. If you've forgotten your password, you can
+                    start fresh — but your chats will be deleted.</p>
+
+                <div class="input-group">
+                    <label for="forgotPasswordPhone">
+                        <i data-lucide="smartphone"></i> Phone number
+                    </label>
+                    <input type="tel" id="forgotPasswordPhone" placeholder="+234 801 234 5678" />
+                </div>
+                <div class="input-group">
+                    <label for="forgotPasswordPassword">
+                        <i data-lucide="key-round"></i> Password
+                    </label>
+                    <input type="password" id="forgotPasswordPassword" placeholder="Your password" />
+                </div>
+
+                <div class="forgot-password-actions">
+                    <button id="forgotPasswordRecoverBtn" class="btn btn-primary">
+                        <i data-lucide="search"></i> Recover PIN
+                    </button>
+                </div>
+
+                <div id="forgotPasswordError" class="error-msg" style="margin-top: 0.6rem;"></div>
+
+                <div id="forgotPasswordPinReveal" class="forgot-password-pin-reveal hidden">
+                    <div class="forgot-password-pin-label">YOUR PIN</div>
+                    <div id="forgotPasswordPinValue" class="forgot-password-pin-value">--------</div>
+                </div>
+
+                <div class="forgot-password-divider">
+                    <hr /> or
+                    <hr />
+                </div>
+
+                <button id="forgotPasswordStartFreshBtn" class="btn btn-secondary btn-block">
+                    <i data-lucide="user-x"></i> Start Fresh (Delete account)
+                </button>
+            </div>
+        </div>
+
+        <!-- ===== MESSAGE CONTEXT MENU ===== -->
+        <div id="messageContextMenu" class="message-context-menu">
+            <button id="ctxReplyBtn" class="ctx-btn">
+                <i data-lucide="reply"></i> Reply
+            </button>
+            <div class="ctx-divider"></div>
+            <button id="ctxDeleteBtn" class="ctx-btn ctx-danger">
+                <i data-lucide="trash-2"></i> Delete for everyone
+            </button>
+            <div class="ctx-divider"></div>
+            <button id="ctxCancelBtn" class="ctx-btn">
+                <i data-lucide="x"></i> Cancel
+            </button>
         </div>
 
         <video id="thumbExtractor" style="display:none" muted playsinline preload="metadata"></video>
