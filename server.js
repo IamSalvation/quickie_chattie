@@ -276,15 +276,14 @@ io.on('connection', (socket) => {
             }
             socket.emit('server-chats', serverChats);
 
-            // Send pending requests
+            // Send pending requests (always emit, even if empty)
             const pendingReqs = await Pending.find({ toPin: pin });
-            if (pendingReqs.length > 0) {
-                socket.emit('pending-requests', pendingReqs.map(r => ({
-                    fromPin: r.fromPin,
-                    fromName: r.fromName,
-                    timestamp: r.timestamp.getTime()
-                })));
-            }
+            socket.emit('pending-requests', pendingReqs.map(r => ({
+                fromPin: r.fromPin,
+                fromName: r.fromName,
+                timestamp: r.timestamp.getTime()
+            })));
+
         } catch (err) {
             console.error('Register error:', err);
             socket.emit('error', 'Server error during registration');

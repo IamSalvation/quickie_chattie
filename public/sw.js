@@ -2,7 +2,7 @@
 // Quickie Service Worker
 // Bump CACHE_VERSION whenever you change cached assets
 // ============================================================
-const CACHE_VERSION = 'quickie-v1';
+const CACHE_VERSION = 'quickie-v3';
 
 const CORE_ASSETS = [
     '/',
