@@ -83,7 +83,6 @@
     let recordingSeconds = 0;
     let isRecording = false;
     let currentEmojiCategory = 'recent';
-    let wasConnected = false;
 
     const partnerStatuses = new Map();
     const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -354,87 +353,19 @@
 
     // ===== Socket Connection =====
     function connectSocket() {
-        socket = io({
-            reconnection: true,
-            reconnectionAttempts: Infinity,
-            reconnectionDelay: 1000,
-            reconnectionDelayMax: 5000,
-            timeout: 20000
-        });
+        socket = io();
 
         socket.on('connect', () => {
             console.log('✅ Socket connected');
             if (myPin && loginAttempted) {
                 socket.emit('register', { pin: myPin, phone: myPhone, name: myName });
                 loginAttempted = false;
-            } else if (myPin && wasConnected) {
-                // Reconnect after a drop — re-register and catch up
-                console.log('🔄 Reconnected — re-registering and syncing');
-                socket.emit('register', { pin: myPin, phone: myPhone, name: myName });
-                if (currentChatId) {
-                    isFirstHistoryLoad = true;
-                    socket.emit('get-chat-history', { chatId: currentChatId });
-                }
-                socket.emit('get-pending-requests', { pin: myPin });
-            }
-            wasConnected = true;
-        });
-
-        socket.on('disconnect', (reason) => {
-            console.log('❌ Socket disconnected:', reason);
-            wasConnected = false;
-        });
-
-        socket.on('reconnect', (attemptNumber) => {
-            console.log('🔄 Reconnected after', attemptNumber, 'attempts');
-        });
-
-        socket.on('connect_error', (err) => {
-            console.warn('⚠️ Connect error:', err.message);
-        });
-
-        // ===== FIX: Reconnect when app comes back to foreground =====
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden) return;
-            console.log('👁️ Tab became visible');
-            if (!socket) return;
-            if (!socket.connected) {
-                console.log('🔄 Socket was dead — reconnecting...');
-                socket.connect();
-            }
-            // Sync anything we may have missed
-            if (socket.connected && currentChatId) {
-                isFirstHistoryLoad = true;
-                socket.emit('get-chat-history', { chatId: currentChatId });
-            }
-            if (socket.connected && myPin) {
-                socket.emit('get-pending-requests', { pin: myPin });
             }
         });
 
-        // ===== FIX: Reconnect on network restore =====
-        window.addEventListener('online', () => {
-            console.log('🌐 Network back online');
-            if (socket && !socket.connected) {
-                socket.connect();
-            }
+        socket.on('connect_error', () => {
+            setError('⚠️ Cannot reach server. Make sure server is running.');
         });
-
-        window.addEventListener('offline', () => {
-            console.log('📴 Network offline');
-        });
-
-        // ===== FIX: Periodic catch-up every 30s =====
-        if (window._quickieSyncTimer) clearInterval(window._quickieSyncTimer);
-        window._quickieSyncTimer = setInterval(() => {
-            if (!socket || !socket.connected) return;
-            if (document.hidden) return;
-            if (!myPin) return;
-            if (currentChatId) {
-                socket.emit('get-chat-history', { chatId: currentChatId });
-            }
-            socket.emit('get-pending-requests', { pin: myPin });
-        }, 30000);
 
         socket.on('registered', ({ pin, name, phone }) => {
             console.log('✅ Registered:', pin, name);
@@ -449,6 +380,8 @@
             if (myName) userNameInput.value = myName;
             if (hintPin) hintPin.textContent = pin;
             setError('');
+
+            // Chats will arrive via 'server-chats' event — no localStorage load needed
             if (socket) socket.emit('get-pending-requests', { pin: myPin });
             refreshIcons();
         });
@@ -459,6 +392,8 @@
             allChats = serverChats || [];
             saveChatsToLocal();
             renderChatList();
+
+            // If current chat no longer exists on server, clear it
             if (currentChatId && !allChats.find(c => c.chatId === currentChatId)) {
                 currentChatId = null;
                 currentPartnerPin = null;
@@ -534,20 +469,19 @@
         });
 
         socket.on('chat-history', ({ chatId, messages }) => {
-            if (chatId !== currentChatId) return;  // Ignore stale history
-            // Clear existing to prevent duplicates
-            messageList.innerHTML = '';
+            if (isFirstHistoryLoad) {
+                messageList.innerHTML = '';
+                allMessages = [];
+                isFirstHistoryLoad = false;
+            }
             allMessages = messages || [];
             allMessages.forEach(msg => displayMessage(msg));
             refreshIcons();
             scrollToBottom();
-            isFirstHistoryLoad = false;
         });
 
         socket.on('chat-message', (msg) => {
             if (msg.from === myPin) return;
-            // Prevent duplicates
-            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('This message was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -562,7 +496,6 @@
 
         socket.on('chat-image', (msg) => {
             if (msg.from === myPin) return;
-            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Image was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -576,7 +509,6 @@
 
         socket.on('chat-file', (msg) => {
             if (msg.from === myPin) return;
-            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('File was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -595,7 +527,6 @@
 
         socket.on('chat-video', (msg) => {
             if (msg.from === myPin) return;
-            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Video was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -614,7 +545,6 @@
 
         socket.on('chat-audio', (msg) => {
             if (msg.from === myPin) return;
-            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Audio was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -631,7 +561,6 @@
 
         socket.on('voice-message', (msg) => {
             if (msg.from === myPin) return;
-            if (allMessages.some(m => m.id === msg.id)) return;
             if (msg.deleted) {
                 appendMessage('Voice was deleted', 'other', msg.id, msg.timestamp);
                 return;
@@ -704,7 +633,8 @@
         });
     }
 
-    // ===== Load Chats (cache) =====
+    // ===== Load Chats =====
+    // Now mostly a cache; server sends authoritative list on register
     function loadChats() {
         const saved = localStorage.getItem('quickie_chats_' + myPin);
         if (saved) {
@@ -971,28 +901,29 @@
             currentPartnerName = '';
             partnerStatuses.clear();
             loginAttempted = false;
-            wasConnected = false;
 
-            // Clear sync timer
-            if (window._quickieSyncTimer) {
-                clearInterval(window._quickieSyncTimer);
-                window._quickieSyncTimer = null;
-            }
-
+            // === FULL UI RESET ===
             chatMenu.classList.remove('active');
             loginScreen.style.display = 'flex';
 
+            // Reset main chat header
             partnerName.textContent = 'Select a chat';
             partnerPin.textContent = '';
             statusDot.className = 'status-dot offline';
             statusText.textContent = 'Offline';
 
+            // Reset message list
             messageList.innerHTML = '';
+
+            // Reset input
             chatInput.value = '';
             chatInput.style.height = 'auto';
+
+            // Reset sidebar lists
             chatListContainer.innerHTML = '';
             pendingList.innerHTML = '';
 
+            // Reset login form
             loginPinInput.value = '';
             loginPinInput.focus();
             pinDisplay.textContent = '- - - - - - - -';
@@ -1000,13 +931,21 @@
             copyPinBtn.classList.add('hidden');
             loginAfterGenerateBtn.classList.add('hidden');
 
+            // Reset add friend section
             if (addFriendSection) addFriendSection.classList.remove('expanded');
+
+            // Close emoji picker if open
             if (emojiPicker) emojiPicker.classList.remove('show');
+
+            // Close search if open
             if (searchBar) searchBar.classList.remove('show');
             if (searchResults) searchResults.classList.remove('show');
             if (searchInput) searchInput.value = '';
 
+            // Disconnect socket
             if (socket) socket.disconnect();
+
+            // Clear cached chats
             if (savedPin) localStorage.removeItem('quickie_chats_' + savedPin);
 
             console.log('👋 Logged out');
@@ -1052,7 +991,7 @@
             return;
         }
 
-        const messageId = ++messageIdCounter + '_' + Date.now();
+        const messageId = ++messageIdCounter;
         const messageData = { id: messageId, text, from: myPin, timestamp: Date.now(), type: 'text', deleted: false };
         allMessages.push(messageData);
         appendMessage(text, 'me', messageId);
@@ -1716,7 +1655,7 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`Image too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_img_' + Math.random().toString(36).slice(2, 6);
+        const messageId = Date.now() + '_img';
         const progress = createProgressBubble(file.name, file.type);
 
         try {
@@ -1744,7 +1683,7 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`File too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_file_' + Math.random().toString(36).slice(2, 6);
+        const messageId = Date.now() + '_file';
         const progress = createProgressBubble(file.name, file.type);
 
         try {
@@ -1777,7 +1716,7 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`Video too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_vid_' + Math.random().toString(36).slice(2, 6);
+        const messageId = Date.now() + '_vid';
         const progress = createProgressBubble(file.name, file.type);
 
         let thumbnail = null;
@@ -1809,7 +1748,7 @@
         if (!currentChatId) { setError('Please select a chat first'); return; }
         if (file.size > MAX_FILE_BYTES) { setError(`Audio too large. Max ${formatBytes(MAX_FILE_BYTES)}`); return; }
 
-        const messageId = Date.now() + '_aud_' + Math.random().toString(36).slice(2, 6);
+        const messageId = Date.now() + '_aud';
         const progress = createProgressBubble(file.name, file.type);
 
         try {
@@ -1876,7 +1815,7 @@
                     const reader = new FileReader();
                     reader.onload = function () {
                         const audioData = reader.result;
-                        const messageId = Date.now() + '_voice_' + Math.random().toString(36).slice(2, 6);
+                        const messageId = Date.now() + '_voice';
                         const data = { id: messageId, audioData, duration: recordingSeconds, from: myPin, timestamp: Date.now(), type: 'voice', deleted: false };
                         allMessages.push(data);
                         appendVoiceMessage(audioData, recordingSeconds, 'me', messageId);
@@ -2132,5 +2071,7 @@
                 .catch((err) => console.warn('⚠️ Service Worker registration failed:', err));
         });
     }
+
+
 
 })();
