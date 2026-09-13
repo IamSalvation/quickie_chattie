@@ -822,6 +822,7 @@ button .lucide {
 
 .user-name-edit input {
     flex: 1;
+    min-width: 0;
     padding: 0.4rem 0.7rem;
     border: 1.5px solid rgba(139, 92, 246, 0.15);
     border-radius: 10px;
@@ -836,6 +837,11 @@ button .lucide {
     border-color: #764ba2;
     box-shadow: 0 0 0 3px rgba(118, 75, 162, 0.1);
     background: white;
+}
+
+.user-name-edit .btn-small {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .pending-requests {
